@@ -1,3 +1,6 @@
+@file:Suppress("SpellCheckingInspection")
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
@@ -6,40 +9,44 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.*
+import androidx.core.graphics.get
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import java.io.IOException
 import java.util.regex.Pattern
 import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 
 private const val TV_COLS = 40
 private const val TV_ROWS = 24
-private const val SCALE_Y = 2f
-
-private sealed class Hotspot(val targetPage: String) {
-    class Rect(val x1: Int, val y1: Int, val x2: Int, val y2: Int, targetPage: String) : Hotspot(targetPage)
-    class Poly(val points: List<Pair<Int, Int>>, targetPage: String) : Hotspot(targetPage)
-}
+private const val SCALE_Y = 3f
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,7 +55,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/* ---------------- URL ---------------- */
+/* ---------------- URLs ---------------- */
 
 private fun textUrl(page: String) =
     "https://www.servizitelevideo.rai.it/televideo/pub/solotesto.jsp?pagina=$page"
@@ -59,7 +66,7 @@ private fun imageUrl(page: String) =
 private fun pageMapUrl(page: String) =
     "https://www.servizitelevideo.rai.it/televideo/pub/pagina.jsp?pagina=$page"
 
-/* ---------------- NETWORK ---------------- */
+/* ---------------- Networking ---------------- */
 
 private fun extractText(html: String): String {
     val doc = Jsoup.parse(html)
@@ -88,17 +95,7 @@ private suspend fun fetchBitmap(client: OkHttpClient, page: String): Bitmap =
         }
     }
 
-private fun extractPages(text: String): List<String> {
-    val set = mutableSetOf<Int>()
-    val m = Pattern.compile("\\b(\\d{3})\\b").matcher(text)
-    while (m.find()) {
-        val n = m.group(1)?.toIntOrNull() ?: continue
-        if (n in 100..899) set.add(n)
-    }
-    return set.sorted().map { it.toString() }
-}
-
-/* ---------------- GRID fallback ---------------- */
+/* ---------------- Teletext grid helpers ---------------- */
 
 private fun normalizeGrid(raw: String): List<String> {
     val lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -127,119 +124,181 @@ private fun findPageAt(lines: List<String>, row: Int, col: Int): String? {
     return null
 }
 
-/* ---------------- IMAGE MAP parsing ---------------- */
+/* ---------------- Auto-crop black borders ---------------- */
 
-private fun extractTargetPageFromHref(href: String?): String? {
-    if (href.isNullOrBlank()) return null
-    val m = Pattern.compile("pagina=(\\d{3})").matcher(href)
-    return if (m.find()) m.group(1) else null
+private fun isNearBlack(argb: Int, thr: Int): Boolean {
+    val r = (argb shr 16) and 0xFF
+    val g = (argb shr 8) and 0xFF
+    val b = (argb) and 0xFF
+    return r <= thr && g <= thr && b <= thr
 }
 
-private fun parseCoords(coords: String?): List<Int> {
-    if (coords.isNullOrBlank()) return emptyList()
-    return coords.split(",").mapNotNull { it.trim().toIntOrNull() }
-}
+private fun autoCropBlackBars(
+    src: Bitmap,
+    blackThreshold: Int = 18,
+    requireRatio: Float = 0.985f,
+    maxCropFrac: Float = 0.12f
+): Bitmap {
+    val w = src.width
+    val h = src.height
+    if (w < 40 || h < 40) return src
 
-private fun parseHotspots(doc: Document): List<Hotspot> {
-    val out = mutableListOf<Hotspot>()
-    val areas = doc.select("map area, area")
-    for (a in areas) {
-        val target = extractTargetPageFromHref(a.attr("href")) ?: continue
-        val shape = a.attr("shape").lowercase().ifBlank { "rect" }
-        val coords = parseCoords(a.attr("coords"))
+    val stepY = max(1, h / 120)
+    val stepX = max(1, w / 120)
 
-        when (shape) {
-            "rect" -> if (coords.size >= 4) {
-                out.add(Hotspot.Rect(coords[0], coords[1], coords[2], coords[3], target))
-            }
-            "poly", "polygon" -> if (coords.size >= 6 && coords.size % 2 == 0) {
-                val pts = coords.chunked(2).map { (x, y) -> x to y }
-                out.add(Hotspot.Poly(pts, target))
-            }
+    fun colIsMostlyBlack(x: Int): Boolean {
+        var total = 0
+        var black = 0
+        var y = 0
+        while (y < h) {
+            if (isNearBlack(src[x, y], blackThreshold)) black++
+            total++
+            y += stepY
         }
+        return black.toFloat() / total >= requireRatio
     }
-    return out
-}
 
-private fun pointInPoly(x: Float, y: Float, pts: List<Pair<Int, Int>>): Boolean {
-    var inside = false
-    var j = pts.size - 1
-    for (i in pts.indices) {
-        val xi = pts[i].first.toFloat()
-        val yi = pts[i].second.toFloat()
-        val xj = pts[j].first.toFloat()
-        val yj = pts[j].second.toFloat()
-
-        val intersects = ((yi > y) != (yj > y)) &&
-                (x < (xj - xi) * (y - yi) / ((yj - yi).takeIf { it != 0f } ?: 1f) + xi)
-
-        if (intersects) inside = !inside
-        j = i
-    }
-    return inside
-}
-
-private fun hitTestHotspots(hotspots: List<Hotspot>, xImg: Float, yImg: Float): String? {
-    for (h in hotspots) {
-        when (h) {
-            is Hotspot.Rect -> {
-                val left = minOf(h.x1, h.x2).toFloat()
-                val right = maxOf(h.x1, h.x2).toFloat()
-                val top = minOf(h.y1, h.y2).toFloat()
-                val bottom = maxOf(h.y1, h.y2).toFloat()
-                if (xImg in left..right && yImg in top..bottom) return h.targetPage
-            }
-            is Hotspot.Poly -> {
-                if (pointInPoly(xImg, yImg, h.points)) return h.targetPage
-            }
+    fun rowIsMostlyBlack(y: Int): Boolean {
+        var total = 0
+        var black = 0
+        var x = 0
+        while (x < w) {
+            if (isNearBlack(src[x, y], blackThreshold)) black++
+            total++
+            x += stepX
         }
+        return black.toFloat() / total >= requireRatio
     }
-    return null
+
+    val maxCropX = (w * maxCropFrac).toInt()
+    val maxCropY = (h * maxCropFrac).toInt()
+
+    var left = 0
+    while (left < min(maxCropX, w - 2) && colIsMostlyBlack(left)) left++
+
+    var right = w - 1
+    while (right > max(w - 1 - maxCropX, 1) && colIsMostlyBlack(right)) right--
+
+    var top = 0
+    while (top < min(maxCropY, h - 2) && rowIsMostlyBlack(top)) top++
+
+    var bottom = h - 1
+    while (bottom > max(h - 1 - maxCropY, 1) && rowIsMostlyBlack(bottom)) bottom--
+
+    val newW = right - left + 1
+    val newH = bottom - top + 1
+
+    if (newW <= 0 || newH <= 0) return src
+    if (newW < w * 0.6f || newH < h * 0.6f) return src
+    if (left == 0 && right == w - 1 && top == 0 && bottom == h - 1) return src
+
+    return Bitmap.createBitmap(src, left, top, newW, newH)
 }
 
-private suspend fun fetchHotspots(client: OkHttpClient, page: String): List<Hotspot> =
-    withContext(Dispatchers.IO) {
-        val req = Request.Builder().url(pageMapUrl(page)).build()
-        client.newCall(req).execute().use {
-            if (!it.isSuccessful) return@withContext emptyList()
-            val html = it.body?.string().orEmpty()
-            parseHotspots(Jsoup.parse(html))
-        }
-    }
+/* ---------------- Subpages heuristic (still stub, but compiles) ---------------- */
 
-/* ---------------- VIEWER ---------------- */
+private suspend fun fetchSubpageLink(
+    client: OkHttpClient,
+    page: String,
+    direction: Int
+): String? = withContext(Dispatchers.IO) {
+    val req = Request.Builder().url(pageMapUrl(page)).build()
+    client.newCall(req).execute().use { resp ->
+        if (!resp.isSuccessful) return@withContext null
+        val html = resp.body?.string().orEmpty()
+        val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
+        val links = doc.select("a[href]")
+
+        val keywords = if (direction < 0)
+            listOf("prev", "preced", "indietro", "su", "up", "↑", "^")
+        else
+            listOf("next", "success", "avanti", "giu", "giù", "down", "↓", "v")
+
+        for (a in links) {
+            val href = a.absUrl("href")
+            if (href.isBlank()) continue
+            val hay = (a.text() + " " + a.attr("title") + " " + a.className() + " " + href).lowercase()
+            if (keywords.any { it in hay }) return@withContext href
+        }
+        null
+    }
+}
+
+/* ---------------- Bookmarks dialog ---------------- */
+
+@Composable
+private fun BookmarksDialog(
+    bookmarks: List<Int>,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Bookmarks") },
+        text = {
+            if (bookmarks.isEmpty()) {
+                Text("No bookmarks.\nLong-press ★ to add the current page.")
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    bookmarks.forEach { p ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { onSelect(p) },
+                                    onLongClick = { /* optional future: remove */ }
+                                )
+                                .padding(vertical = 10.dp, horizontal = 8.dp)
+                        ) {
+                            Text(
+                                text = p.toString(),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+/* ---------------- Viewer ---------------- */
 
 @Composable
 private fun TelevideoViewer(
     bitmap: Bitmap?,
     grid: List<String>,
-    hotspots: List<Hotspot>,
-    pageKey: String,
-    isLoading: Boolean,
     modifier: Modifier = Modifier,
-    onPageClick: (String) -> Unit
+    onTapPage: (String) -> Unit,
+    onLongPressPage: (String) -> Unit
 ) {
     val scroll = rememberScrollState()
-
-    // ✅ fondamentale: quando cambia pagina, torni sempre in alto
-    LaunchedEffect(pageKey) {
-        scroll.scrollTo(0)
-    }
-
     val density = LocalDensity.current
-    var widthPx by remember { mutableStateOf(0) }
+    var widthPx by remember { mutableIntStateOf(0) }
 
     Box(
-        modifier = modifier.verticalScroll(scroll),
+        modifier = modifier
+            .background(Color.Black)
+            .verticalScroll(scroll),
         contentAlignment = Alignment.TopCenter
     ) {
         if (bitmap == null) {
             Box(
-                Modifier
+                modifier = Modifier
                     .fillMaxWidth()
-                    .height(200.dp),
+                    .height(160.dp),
                 contentAlignment = Alignment.Center
-            ) { Text("Caricamento…") }
+            ) {
+                Text("Loading…", color = Color.White)
+            }
             return@Box
         }
 
@@ -267,45 +326,28 @@ private fun TelevideoViewer(
                     contentScale = ContentScale.FillBounds
                 )
 
-                // piccolo overlay di loading (non rompe i tap perché è in alto e non blocca)
-                if (isLoading) {
-                    Box(
-                        Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(8.dp)
-                    ) {
-                        AssistChip(
-                            onClick = {},
-                            label = { Text("Caricamento…") }
-                        )
-                    }
-                }
-
-                // ✅ blocca tap mentre carica (evita stati strani)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(bitmap, grid, hotspots, widthPx, scaledHeightPx, isLoading) {
-                            detectTapGestures { tap ->
-                                if (isLoading) return@detectTapGestures
-
-                                val w = widthPx.toFloat().coerceAtLeast(1f)
-                                val h = scaledHeightPx.coerceAtLeast(1f)
-
-                                val xImg = (tap.x / w) * bitmap.width.toFloat()
-                                val yImg = (tap.y / h) * bitmap.height.toFloat()
-
-                                val hitByMap = hitTestHotspots(hotspots, xImg, yImg)
-                                if (hitByMap != null) {
-                                    onPageClick(hitByMap)
-                                    return@detectTapGestures
+                        .pointerInput(bitmap, grid, widthPx, scaledHeightPx) {
+                            detectTapGestures(
+                                onTap = { tap ->
+                                    val w = widthPx.toFloat().coerceAtLeast(1f)
+                                    val h = scaledHeightPx.coerceAtLeast(1f)
+                                    val col = floor((tap.x / w) * TV_COLS).toInt().coerceIn(0, TV_COLS - 1)
+                                    val row = floor((tap.y / h) * TV_ROWS).toInt().coerceIn(0, TV_ROWS - 1)
+                                    val hit = findPageAt(grid, row, col)
+                                    if (hit != null) onTapPage(hit)
+                                },
+                                onLongPress = { tap ->
+                                    val w = widthPx.toFloat().coerceAtLeast(1f)
+                                    val h = scaledHeightPx.coerceAtLeast(1f)
+                                    val col = floor((tap.x / w) * TV_COLS).toInt().coerceIn(0, TV_COLS - 1)
+                                    val row = floor((tap.y / h) * TV_ROWS).toInt().coerceIn(0, TV_ROWS - 1)
+                                    val hit = findPageAt(grid, row, col)
+                                    if (hit != null) onLongPressPage(hit)
                                 }
-
-                                val col = floor((tap.x / w) * TV_COLS).toInt().coerceIn(0, TV_COLS - 1)
-                                val row = floor((tap.y / h) * TV_ROWS).toInt().coerceIn(0, TV_ROWS - 1)
-                                val hitByGrid = findPageAt(grid, row, col)
-                                if (hitByGrid != null) onPageClick(hitByGrid)
-                            }
+                            )
                         }
                 )
             }
@@ -313,7 +355,63 @@ private fun TelevideoViewer(
     }
 }
 
-/* ---------------- APP ---------------- */
+/* ---------------- Top bar (tap vs long press) ---------------- */
+
+@Composable
+private fun TvNavButton(
+    label: String,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .combinedClickable(onClick = onTap, onLongClick = onLongPress)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(label, color = Color.White, fontFamily = FontFamily.Monospace)
+    }
+}
+
+@Composable
+private fun TvNavBar(
+    currentPage: String,
+    onGoTo: (String) -> Unit,
+    onSubUp: (Int) -> Unit,
+    onSubDown: (Int) -> Unit,
+    onStarTap: () -> Unit,
+    onStarLongPress: () -> Unit
+) {
+    fun clamp(p: Int) = p.coerceIn(100, 899)
+    val cur = currentPage.toIntOrNull() ?: 100
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.Black)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TvNavButton("★", onTap = onStarTap, onLongPress = onStarLongPress)
+            TvNavButton("100", onTap = { onGoTo("100") }, onLongPress = { onGoTo("101") })
+            TvNavButton("101", onTap = { onGoTo("101") }, onLongPress = { onGoTo("102") })
+            TvNavButton("103", onTap = { onGoTo("103") }, onLongPress = { onGoTo("104") })
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TvNavButton("<", onTap = { onGoTo(clamp(cur - 1).toString()) }, onLongPress = { onGoTo(clamp(cur - 10).toString()) })
+            TvNavButton(">", onTap = { onGoTo(clamp(cur + 1).toString()) }, onLongPress = { onGoTo(clamp(cur + 10).toString()) })
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TvNavButton("^", onTap = { onSubUp(1) }, onLongPress = { onSubUp(5) })
+            TvNavButton("v", onTap = { onSubDown(1) }, onLongPress = { onSubDown(5) })
+        }
+    }
+}
+
+/* ---------------- App ---------------- */
 
 @Composable
 fun TelevideoApp() {
@@ -323,97 +421,91 @@ fun TelevideoApp() {
     var currentPage by remember { mutableStateOf("100") }
     var grid by remember { mutableStateOf(normalizeGrid("")) }
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var pageList by remember { mutableStateOf(emptyList<String>()) }
-    var hotspots by remember { mutableStateOf(emptyList<Hotspot>()) }
-    var isLoading by remember { mutableStateOf(false) }
 
-    var job by remember { mutableStateOf<Job?>(null) }
+    val bookmarks = remember { mutableStateListOf<Int>() }
+    var showBookmarks by remember { mutableStateOf(false) }
 
-    fun load(page: String, extractList: Boolean) {
-        job?.cancel()
-        job = scope.launch {
+    fun load(page: String) {
+        scope.launch {
             try {
-                isLoading = true
-
-                // ✅ NON azzerare bitmap: mantieni la pagina visibile finché arriva la nuova
                 val t = async { fetchText(client, page) }
-                val b = async { fetchBitmap(client, page) }
-                val m = async { fetchHotspots(client, page) }
-
+                val b = async {
+                    val raw = fetchBitmap(client, page)
+                    autoCropBlackBars(raw)
+                }
                 val text = t.await()
                 val bmp = b.await()
-                val hs = m.await()
 
                 currentPage = page
                 grid = normalizeGrid(text)
                 bitmap = bmp
-                hotspots = hs
-
-                if (extractList) pageList = extractPages(text)
-            } catch (e: Exception) {
-                grid = normalizeGrid("Errore: ${e.message}")
-                // qui puoi scegliere: lasciare bitmap precedente o metterla a null
-                // bitmap = null
-                hotspots = emptyList()
-            } finally {
-                isLoading = false
+            } catch (_: Exception) {
+                // keep last good page
             }
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
-        Button(
-            onClick = { load("100", true) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("🔴 Carica Televideo Pagina 100")
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        Card(
-            Modifier
-                .fillMaxWidth()
-                .height(180.dp)
-        ) {
-            if (pageList.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Carica la 100 per iniziare")
+    fun subNav(direction: Int, step: Int) {
+        scope.launch {
+            try {
+                repeat(step) {
+                    val link = fetchSubpageLink(client, currentPage, direction) ?: return@launch
+                    val m = Pattern.compile("[?&]pagina=(\\d{3})").matcher(link)
+                    var p: String? = null
+                    while (m.find()) p = m.group(1)
+                    if (p != null) load(p) else return@launch
                 }
-            } else {
-                LazyColumn {
-                    items(pageList.take(120)) { p ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable { load(p, false) }
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("📄 $p")
-                            if (p == currentPage) Text("▶")
-                        }
-                        HorizontalDivider()
-                    }
-                }
+            } catch (_: Exception) {
+                // keep last good page
             }
         }
+    }
 
-        Spacer(Modifier.height(12.dp))
+    fun addCurrentToBookmarks() {
+        val p = currentPage.toIntOrNull() ?: return
+        if (!bookmarks.contains(p)) {
+            bookmarks.add(p)
+            bookmarks.sort()
+        }
+    }
 
-        Card(Modifier.fillMaxSize()) {
-            TelevideoViewer(
-                bitmap = bitmap,
-                grid = grid,
-                hotspots = hotspots,
-                pageKey = currentPage,
-                isLoading = isLoading,
-                modifier = Modifier.fillMaxSize(),
-                onPageClick = { tapped -> load(tapped, false) }
+    LaunchedEffect(Unit) { load("100") }
+
+    Column(Modifier.fillMaxSize()) {
+
+        TvNavBar(
+            currentPage = currentPage,
+            onGoTo = { p -> load(p) },
+            onSubUp = { step -> subNav(-1, step) },
+            onSubDown = { step -> subNav(+1, step) },
+            onStarTap = { showBookmarks = true },
+            onStarLongPress = { addCurrentToBookmarks() }
+        )
+
+        TelevideoViewer(
+            bitmap = bitmap,
+            grid = grid,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            onTapPage = { tapped -> load(tapped) },
+            onLongPressPage = { tapped ->
+                val p = tapped.toIntOrNull()
+                if (p != null && !bookmarks.contains(p)) {
+                    bookmarks.add(p)
+                    bookmarks.sort()
+                }
+            }
+        )
+
+        if (showBookmarks) {
+            BookmarksDialog(
+                bookmarks = bookmarks,
+                onDismiss = { showBookmarks = false },
+                onSelect = { p ->
+                    showBookmarks = false
+                    load(p.toString())
+                }
             )
         }
     }
