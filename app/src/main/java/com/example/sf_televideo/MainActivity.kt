@@ -46,7 +46,7 @@ import kotlin.math.min
 
 private const val TV_COLS = 40
 private const val TV_ROWS = 24
-private const val SCALE_Y = 3f
+private const val SCALE_Y = 2.5f
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
