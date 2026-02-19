@@ -2,13 +2,26 @@
 
 package com.example.sf_televideo
 
+import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+//import kotlinx.coroutines.withContext
+
+// ---------- DataStore ----------
+private val Context.dataStore by preferencesDataStore(name = "sf_televideo_prefs")
+private val BOOKMARKS_KEY = stringSetPreferencesKey("bookmarks_pages")
 
 @Composable
 fun TelevideoApp() {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repo = remember { TelevideoRepository() }
 
@@ -22,6 +35,25 @@ fun TelevideoApp() {
     val bookmarks = remember { mutableStateListOf<Int>() }
     var showBookmarks by remember { mutableStateOf(false) }
 
+    // ---- Load bookmarks once at startup ----
+    LaunchedEffect(Unit) {
+        val prefs = context.dataStore.data.first()
+        val saved = prefs[BOOKMARKS_KEY].orEmpty()
+            .mapNotNull { it.toIntOrNull() }
+            .distinct()
+            .sorted()
+        bookmarks.clear()
+        bookmarks.addAll(saved)
+    }
+
+    fun persistBookmarks() {
+        scope.launch {
+            context.dataStore.edit { prefs ->
+                prefs[BOOKMARKS_KEY] = bookmarks.map { it.toString() }.toSet()
+            }
+        }
+    }
+
     fun load(page: String) {
         val p = page.toIntOrNull() ?: return
         if (p !in 100..899) return
@@ -29,14 +61,34 @@ fun TelevideoApp() {
         scope.launch {
             isLoading = true
             errorText = null
+
+            // ✅ IMPORTANTISSIMO: aggiorna SUBITO lo stato pagina richiesto
+            // così ★ salva sempre la pagina che stai visualizzando/caricando
+            currentPage = page
+            currentSubpage = "01"
+
+            // opzionale: reset aree mentre carichi
+            clickAreas = emptyList()
+
             try {
-                val bmpJob = async { repo.fetchBitmap(page) }
-                val mapJob = async { repo.fetchClickAreas(page) }
-                bitmap = bmpJob.await()
-                clickAreas = mapJob.await()
-                currentPage = page
-                currentSubpage = "01"
+                // carico bitmap e clickAreas in parallelo
+                val bmpJob = async(Dispatchers.IO) { repo.fetchBitmap(page) }
+                val areasJob = async { // lascia nel dispatcher interno del repo
+                    repo.fetchClickAreas(page) // oppure repo.fetchClickAreas(page, bitmap) se usi OCR+bitmap
+                }
+
+                // 1) bitmap: se fallisce, non puoi mostrare la pagina → errore vero
+                val bmp = bmpJob.await()
+                bitmap = bmp
+
+                // 2) clickAreas: se falliscono, NON bloccare la pagina
+                clickAreas = try {
+                    areasJob.await()
+                } catch (_: Exception) {
+                    emptyList()
+                }
             } catch (e: Exception) {
+                // se siamo qui è perché la bitmap non è arrivata (o altro grave)
                 errorText = e.message ?: "Unknown error"
             } finally {
                 isLoading = false
@@ -57,13 +109,19 @@ fun TelevideoApp() {
         showBookmarks = showBookmarks,
         onShowBookmarksChange = { showBookmarks = it },
         onLoadPage = { load(it) },
-        onAddBookmark = { page ->
-            val n = page.toIntOrNull() ?: return@TelevideoScreen
+        onAddBookmark = { pageStr ->
+            val n = pageStr.toIntOrNull() ?: return@TelevideoScreen
+            if (n !in 100..899) return@TelevideoScreen
             if (!bookmarks.contains(n)) {
                 bookmarks.add(n)
                 bookmarks.sort()
+                persistBookmarks()
             }
         },
-        onRemoveBookmark = { bookmarks.remove(it) }
+        onRemoveBookmark = { n ->
+            if (bookmarks.remove(n)) {
+                persistBookmarks()
+            }
+        }
     )
 }

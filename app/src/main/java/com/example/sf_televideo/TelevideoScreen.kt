@@ -99,7 +99,8 @@ fun TelevideoScreen(
                     bitmap = bitmap,
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
-                    onTapArea = { onLoadPage(it.page) }
+                    onTapArea = { onLoadPage(it.page) },
+                    debug = false
                 )
             }
         }
