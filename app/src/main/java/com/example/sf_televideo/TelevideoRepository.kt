@@ -1,3 +1,4 @@
+// TelevideoRepository.kt
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
@@ -42,10 +43,11 @@ class TelevideoRepository(
     suspend fun fetchBitmap(page: String): Bitmap =
         withContext(Dispatchers.IO) {
             val primaryUrl = imageUrl(page)
+            Log.d("BMP", "fetchBitmap(page=$page) primaryUrl=$primaryUrl")
+
             try {
                 fetchBitmapFromUrl(primaryUrl)
             } catch (e: IOException) {
-                // Se è un 404, prova il fallback su pagina.jsp
                 val msg = e.message.orEmpty()
                 val is404 = msg.contains("HTTP 404", ignoreCase = true)
 
@@ -63,8 +65,9 @@ class TelevideoRepository(
                     null
                 }
 
+                Log.d("BMP", "fallbackImageUrl for page=$page -> $fallbackImageUrl")
+
                 if (fallbackImageUrl.isNullOrBlank()) {
-                    // niente da fare: pagina esiste ma non troviamo immagine
                     throw IOException("Pagina $page non disponibile (immagine non trovata)")
                 }
 
@@ -78,6 +81,8 @@ class TelevideoRepository(
         }
 
     private fun fetchBitmapFromUrl(url: String): Bitmap {
+        Log.d("BMP", "fetchBitmapFromUrl url=$url")
+
         val req = Request.Builder().url(url).build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw IOException("HTTP ${resp.code} url=$url")
@@ -89,9 +94,6 @@ class TelevideoRepository(
 
     /**
      * Legge pagina.jsp?pagina=XXX e prova a ricavare l'URL dell'immagine reale.
-     * Strategie:
-     * - cerca <img ... src="...png">
-     * - cerca qualunque src che contenga "page-" e finisca con .png
      */
     private fun resolveImageUrlFromPaginaJsp(page: String): String? {
         val url = mapUrl(page)
@@ -104,12 +106,12 @@ class TelevideoRepository(
 
             val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
 
-            // 1) tentativo: prima immagine png in pagina
+            // 1) prima immagine png in pagina
             val img1 = doc.selectFirst("img[src$=.png]")
             val abs1 = img1?.absUrl("src")?.takeIf { it.isNotBlank() }
             if (!abs1.isNullOrBlank()) return abs1
 
-            // 2) tentativo: qualunque img con "page-" e ".png"
+            // 2) qualunque img con "page-" e ".png"
             val imgs = doc.select("img[src]")
             for (img in imgs) {
                 val src = img.attr("src")
@@ -119,7 +121,7 @@ class TelevideoRepository(
                 }
             }
 
-            // 3) last resort: regex dentro html
+            // 3) regex dentro html
             val rx = Regex("""https?://[^\s"'<>]+\.png""", RegexOption.IGNORE_CASE)
             return rx.find(html)?.value
         }

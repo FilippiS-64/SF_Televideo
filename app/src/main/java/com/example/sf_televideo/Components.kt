@@ -1,8 +1,12 @@
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
+import android.graphics.Paint
+import android.util.Log
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,21 +20,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.consumeAllChanges
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
-
-// DEBUG overlay imports
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.nativeCanvas
-import android.graphics.Paint
+import kotlin.math.abs
 
 @Composable
 fun ToolbarButton(label: String, onClick: () -> Unit) {
@@ -100,6 +102,7 @@ fun BookmarksDialog(
                                 fontSize = 12.sp
                             )
                         }
+                        // Se vuoi eliminare warning: puoi sostituire con HorizontalDivider()
                         Divider()
                     }
                 }
@@ -116,8 +119,7 @@ fun BookmarksDialog(
 private fun sanitizePage(raw: String?): String? {
     if (raw.isNullOrBlank()) return null
     val m = Regex("""([1-8]\d{2})""").find(raw)
-    val p = m?.groupValues?.getOrNull(1) ?: return null
-    return p
+    return m?.groupValues?.getOrNull(1)
 }
 
 @Composable
@@ -126,13 +128,14 @@ fun TelevideoImage(
     clickAreas: List<ClickArea>,
     stretchY: Float,
     onTapArea: (ClickArea) -> Unit,
+    onSwipePage: (delta: Int) -> Unit,
+    onSwipeSub: (delta: Int) -> Unit,
     debug: Boolean = false
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
 
     // ------------------------------------------------------------
     // Correzione automatica della scala orizzontale (X)
-    // k = 0.80 (come hai validato)
     // ------------------------------------------------------------
     val correctedAreas = remember(bitmap.width, clickAreas) {
         if (clickAreas.isEmpty()) return@remember emptyList<ClickArea>()
@@ -172,9 +175,46 @@ fun TelevideoImage(
     var lastChosenClean by remember { mutableStateOf<String?>(null) }
     var lastChosenRect by remember { mutableStateOf<ClickArea?>(null) }
 
+    val swipeThresholdPx = 90f
+
     val imgModifier = Modifier
         .fillMaxWidth()
         .aspectRatio(bitmap.width.toFloat() / (bitmap.height.toFloat() * stretchY))
+        // 1) DRAG (swipe)
+        .pointerInput(bitmap, stretchY) {
+            var totalX = 0f
+            var totalY = 0f
+
+            detectDragGestures(
+                onDragStart = {
+                    totalX = 0f
+                    totalY = 0f
+                },
+                onDrag = { change, dragAmount ->
+                    // ✅ compatibile con la tua versione (anche se deprecato)
+                    change.consumeAllChanges()
+                    totalX += dragAmount.x
+                    totalY += dragAmount.y
+                },
+                onDragEnd = {
+                    val ax = abs(totalX)
+                    val ay = abs(totalY)
+
+                    if (maxOf(ax, ay) < swipeThresholdPx) return@detectDragGestures
+
+                    if (ax > ay) {
+                        val delta = if (totalX < 0) +1 else -1
+                        if (debug) Log.d("TVDBG", "TelevideoImage swipe PAGE delta=$delta totalX=$totalX totalY=$totalY")
+                        onSwipePage(delta)
+                    } else {
+                        val delta = if (totalY < 0) +1 else -1
+                        if (debug) Log.d("TVDBG", "TelevideoImage swipe SUB delta=$delta totalX=$totalX totalY=$totalY")
+                        onSwipeSub(delta)
+                    }
+                }
+            )
+        }
+        // 2) TAP aree cliccabili
         .pointerInput(bitmap, correctedAreas, stretchY) {
             detectTapGestures { tap: Offset ->
                 val vw = size.width
@@ -206,13 +246,12 @@ fun TelevideoImage(
                     lastChosenRaw = rawPage
                     lastChosenClean = cleanPage
 
-                    println(
-                        "TVDBG tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { it.page }} " +
-                                "chosenRaw=$rawPage chosenClean=$cleanPage"
+                    Log.d(
+                        "TVDBG",
+                        "tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { it.page }} chosenRaw=$rawPage chosenClean=$cleanPage"
                     )
                 }
 
-                // 🚫 Se la pagina OCR è sporca/invalid -> NON navighiamo (evita crash)
                 if (hit != null && cleanPage != null) {
                     val safeHit = hit.copy(page = cleanPage)
                     onTapArea(safeHit)
@@ -278,20 +317,17 @@ fun TelevideoImage(
                     drawContext.canvas.nativeCanvas.drawText(a.page, tx, ty, textPaintFill)
                 }
 
-                // crosshair view
                 lastTapView?.let { tv ->
                     drawLine(Color.Cyan, Offset(tv.x - 18f, tv.y), Offset(tv.x + 18f, tv.y), strokeWidth = 3f)
                     drawLine(Color.Cyan, Offset(tv.x, tv.y - 18f), Offset(tv.x, tv.y + 18f), strokeWidth = 3f)
                 }
 
-                // point bitmap->view
                 lastTapBmp?.let { (bx, by) ->
                     val cx = bx * sx
                     val cy = by * sy
                     drawCircle(Color.Magenta, radius = 7f, center = Offset(cx, cy))
                 }
 
-                // rettangolo scelto evidenziato (giallo)
                 lastChosenRect?.let { a ->
                     val x = a.x1 * sx
                     val y = a.y1 * sy
@@ -303,58 +339,6 @@ fun TelevideoImage(
                             topLeft = Offset(x, y),
                             size = Size(ww, hh),
                             style = Stroke(width = 6f)
-                        )
-                    }
-                }
-            }
-
-            val info = buildString {
-                val tv = lastTapView
-                val tb = lastTapBmp
-                append("bmp=${bitmap.width}x${bitmap.height}\n")
-                append("tapView=")
-                append(if (tv != null) "(${tv.x.roundToInt()},${tv.y.roundToInt()})" else "null")
-                append("  tapBmp=")
-                append(if (tb != null) "(${tb.first},${tb.second})" else "null")
-                append("\n")
-                append("hits=${lastHits.size}")
-                if (lastHits.isNotEmpty()) {
-                    append(" pages=")
-                    append(lastHits.joinToString { it.page })
-                }
-                append("\nchosenRaw=")
-                append(lastChosenRaw ?: "null")
-                append("\nchosenClean=")
-                append(lastChosenClean ?: "null")
-            }
-
-            Column(
-                modifier = Modifier
-                    .padding(8.dp)
-                    .background(Color(0x99000000))
-                    .padding(6.dp)
-            ) {
-                Text(
-                    text = info,
-                    color = Color.White,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp
-                )
-
-                if (lastChosenClean != null) {
-                    Spacer(Modifier.height(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xCC000000))
-                            .padding(10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "GO ${lastChosenClean}",
-                            color = Color.Yellow,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 22.sp
                         )
                     }
                 }

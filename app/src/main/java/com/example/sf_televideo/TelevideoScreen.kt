@@ -3,6 +3,7 @@
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -10,7 +11,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -34,7 +34,7 @@ fun TelevideoScreen(
             .background(Color.Black)
     ) {
         TopAppBar(
-            navigationIcon = { },   // niente spazio per icona nav
+            navigationIcon = { },
             title = {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -45,20 +45,23 @@ fun TelevideoScreen(
                         onTap = { onShowBookmarksChange(true) },
                         onLongPress = { onAddBookmark(currentPage) }
                     )
+
                     ToolbarButton("100") { onLoadPage("100") }
                     ToolbarButton("101") { onLoadPage("101") }
                     ToolbarButton("103") { onLoadPage("103") }
+
                     ToolbarButton("<") {
                         val p = (currentPage.toIntOrNull() ?: 100) - 1
                         if (p in 100..899) onLoadPage(p.toString())
                     }
+
                     ToolbarButton(">") {
                         val p = (currentPage.toIntOrNull() ?: 100) + 1
                         if (p in 100..899) onLoadPage(p.toString())
                     }
                 }
             },
-            actions = { }, // IMPORTANTISSIMO: vuoto, sennò torna a destra
+            actions = { },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = Color(0xFF101010),
                 titleContentColor = Color.White,
@@ -100,6 +103,31 @@ fun TelevideoScreen(
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
                     onTapArea = { onLoadPage(it.page) },
+
+                    // ✅ swipe pagina
+                    onSwipePage = { delta ->
+                        if (isLoading) return@TelevideoImage
+                        val pageInt = currentPage.toIntOrNull() ?: return@TelevideoImage
+                        val next = pageInt + delta
+                        if (next in 100..899) {
+                            Log.d("TVDBG", "onSwipePage delta=$delta current=$currentPage -> next=$next")
+                            onLoadPage(next.toString())
+                        }
+                    },
+
+                    // ✅ swipe subpage
+                    onSwipeSub = { delta ->
+                        if (isLoading) return@TelevideoImage
+                        val subInt = currentSubpage.toIntOrNull() ?: 1
+                        val nextSub = subInt + delta
+                        if (nextSub in 1..99) {
+                            val sp = nextSub.toString().padStart(2, '0')
+                            Log.d("TVDBG", "onSwipeSub delta=$delta currentSub=$currentSubpage -> nextSub=$sp")
+                            onLoadPage("${currentPage}-$sp")
+                        }
+                    },
+
+                    // ✅ IMPORTANTISSIMO: niente overlay
                     debug = false
                 )
             }
