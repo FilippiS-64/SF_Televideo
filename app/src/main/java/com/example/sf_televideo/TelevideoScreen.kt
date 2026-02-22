@@ -3,13 +3,10 @@
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
-import android.util.Log
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -28,10 +25,10 @@ fun TelevideoScreen(
     onShowBookmarksChange: (Boolean) -> Unit,
     onLoadPage: (String) -> Unit,
     onAddBookmark: (String) -> Unit,
-    onRemoveBookmark: (Int) -> Unit
+    onRemoveBookmark: (Int) -> Unit,
+    onSwipePage: (Int) -> Unit,
+    onSwipeSub: (Int) -> Unit
 ) {
-    val scroll = rememberScrollState()
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -41,9 +38,7 @@ fun TelevideoScreen(
             navigationIcon = { },
             title = {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(scroll),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Start,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -52,12 +47,11 @@ fun TelevideoScreen(
                         onLongPress = { onAddBookmark(currentPage) }
                     )
 
-                    // bottoni rapidi
                     ToolbarButton("100") { onLoadPage("100") }
                     ToolbarButton("101") { onLoadPage("101") }
                     ToolbarButton("103") { onLoadPage("103") }
 
-                    // richiesti da te al posto delle frecce
+                    // ✅ nuovi bottoni
                     ToolbarButton("201") { onLoadPage("201") }
                     ToolbarButton("260") { onLoadPage("260") }
                 }
@@ -104,31 +98,8 @@ fun TelevideoScreen(
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
                     onTapArea = { onLoadPage(it.page) },
-
-                    // swipe pagina
-                    onSwipePage = { delta ->
-                        if (isLoading) return@TelevideoImage
-                        val pageInt = currentPage.toIntOrNull() ?: return@TelevideoImage
-                        val next = pageInt + delta
-                        if (next in 100..899) {
-                            Log.d("TVDBG", "onSwipePage delta=$delta current=$currentPage -> next=$next")
-                            onLoadPage(next.toString())
-                        }
-                    },
-
-                    // swipe subpage
-                    onSwipeSub = { delta ->
-                        if (isLoading) return@TelevideoImage
-                        val subInt = currentSubpage.toIntOrNull() ?: 1
-                        val nextSub = subInt + delta
-                        if (nextSub in 1..99) {
-                            val sp = nextSub.toString().padStart(2, '0')
-                            Log.d("TVDBG", "onSwipeSub delta=$delta currentSub=$currentSubpage -> nextSub=$sp")
-                            onLoadPage("${currentPage}-$sp")
-                        }
-                    },
-
-                    // niente overlay
+                    onSwipePage = { delta -> onSwipePage(delta) },
+                    onSwipeSub = { delta -> onSwipeSub(delta) },
                     debug = false
                 )
             }

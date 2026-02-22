@@ -1,4 +1,3 @@
-// TelevideoRepository.kt
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
@@ -24,21 +23,21 @@ class TelevideoRepository(
         private const val TAG = "TelevideoRepo"
     }
 
-    // Pagina "grafica" che contiene anche l'IMG reale
-    // (tu hai verificato che questo URL funziona e mostra la subpage corretta)
-    private fun paginaJspUrl(page: String, subInt: Int?): String {
-        return if (subInt == null) {
-            // pagina base (compatibile col tuo vecchio mapUrl)
-            "https://www.servizitelevideo.rai.it/televideo/pub/pagina.jsp?pagina=$page"
+    // key può essere "102" oppure "102-02"
+    fun imageUrl(key: String): String =
+        "https://www.servizitelevideo.rai.it/televideo/pub/tt4web/Nazionale/16_9_page-$key.png"
+
+    // pagina.jsp: per le sottopagine usa i parametri p e s (come l'URL che hai verificato tu)
+    fun paginaJspUrl(page: String, sub: Int?): String {
+        val base = "https://www.servizitelevideo.rai.it/televideo/pub/pagina.jsp"
+        return if (sub == null || sub <= 1) {
+            "$base?p=$page&r=Nazionale"
         } else {
-            // versione con p/s (molto più affidabile per le sottopagine)
-            // tieni pagetocall=pagina.jsp come nel link che hai testato
-            val s = subInt.toString()
-            "https://www.servizitelevideo.rai.it/televideo/pub/pagina.jsp?p=$page&s=$s&r=Nazionale&pagetocall=pagina.jsp"
+            "$base?p=$page&s=$sub&r=Nazionale"
         }
     }
 
-    // MAP HTML (<area>)
+    // per clickAreas manteniamo il vecchio map “semplice”
     fun mapUrl(page: String): String =
         "https://www.servizitelevideo.rai.it/televideo/pub/pagina.jsp?pagina=$page"
 
@@ -47,94 +46,73 @@ class TelevideoRepository(
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
-    /**
-     * pageKey può essere:
-     * - "102"      -> page=102 sub=null (o sub=01 gestita a monte)
-     * - "102-08"   -> page=102 sub=8
-     * - "10208"    -> page=102 sub=8
-     * - "pagina=102&sottopagina=8" -> page=102 sub=8
-     */
-    private fun parsePageKey(pageKey: String): Pair<String, Int?>? {
-        val cleaned = pageKey.trim()
-
-        // caso "102-08" o "102/08"
-        val sepMatch = Regex("""^\s*([1-8]\d{2})\s*[-/]\s*(\d{1,2})\s*$""").find(cleaned)
-        if (sepMatch != null) {
-            val p = sepMatch.groupValues[1]
-            val s = sepMatch.groupValues[2].toIntOrNull() ?: return null
-            if (s !in 1..99) return null
+    private fun parseKey(key: String): Pair<String, Int?> {
+        val m = Regex("""^\s*([1-8]\d{2})(?:[-/](\d{1,2}))?\s*$""").find(key.trim())
+        if (m != null) {
+            val p = m.groupValues[1]
+            val s = m.groupValues.getOrNull(2)?.takeIf { it.isNotBlank() }?.toIntOrNull()
             return p to s
         }
-
-        // fallback: solo cifre (supporta "10208", querystring, ecc.)
-        val digits = cleaned.filter { it.isDigit() }
-        if (digits.length < 3) return null
-        val page = digits.substring(0, 3)
-        val pageInt = page.toIntOrNull() ?: return null
-        if (pageInt !in 100..899) return null
-
-        val sub: Int? = if (digits.length >= 5) {
-            digits.substring(3, 5).toIntOrNull()?.takeIf { it in 1..99 }
-        } else {
-            null
-        }
-
-        return page to sub
+        // fallback: prendi solo cifre
+        val digits = key.filter { it.isDigit() }
+        val p = digits.take(3)
+        val s = if (digits.length >= 5) digits.substring(3, 5).toIntOrNull() else null
+        return p to s
     }
 
     /**
-     * Fetch bitmap ROBUSTA:
-     * - Se pageKey è una pagina base (sub=null) prova PNG diretta classica, poi fallback su pagina.jsp
-     * - Se pageKey include subpage (sub!=null) NON proviamo mille pattern a caso:
-     *   andiamo direttamente su pagina.jsp?p=XXX&s=Y e estraiamo l'IMG reale (src png) e la scarichiamo.
+     * Bitmap fetch robusta:
+     * 1) prova URL PNG standard (tt4web)
+     * 2) se 404 -> scarica pagina.jsp (con p/s corretti) e trova l'IMG reale -> scarica quella
      */
-    suspend fun fetchBitmap(pageKey: String): Bitmap =
+    suspend fun fetchBitmap(key: String): Bitmap =
         withContext(Dispatchers.IO) {
-            val parsed = parsePageKey(pageKey)
-                ?: throw IOException("pageKey non valido: $pageKey")
-
-            val page = parsed.first
-            val sub = parsed.second
-
-            Log.d("BMP", "fetchBitmap(pageKey=$pageKey) parsed page=$page sub=$sub")
-
-            // 1) Se NON è sottopagina, prova la PNG "classica"
-            if (sub == null) {
-                val primaryUrl =
-                    "https://www.servizitelevideo.rai.it/televideo/pub/tt4web/Nazionale/16_9_page-$page.png"
-
-                Log.d("BMP", "fetchBitmap(pageKey=$pageKey) try direct=$primaryUrl")
-
-                try {
-                    return@withContext fetchBitmapFromUrl(primaryUrl)
-                } catch (e: IOException) {
-                    Log.w(TAG, "Direct PNG failed for $pageKey url=$primaryUrl err=${e.message}")
-                    // fallback sotto
-                }
-            }
-
-            // 2) Fallback (o caso subpage): passa SEMPRE da pagina.jsp e ricava l'IMG reale
-            val paginaUrl = paginaJspUrl(page, sub)
-            Log.d("BMP", "fetchBitmap(pageKey=$pageKey) resolve via pagina.jsp url=$paginaUrl")
-
-            val resolvedImgUrl = resolveImageUrlFromPaginaJsp(paginaUrl)
-            Log.d("BMP", "fetchBitmap(pageKey=$pageKey) resolvedImgUrl=$resolvedImgUrl")
-
-            if (resolvedImgUrl.isNullOrBlank()) {
-                // messaggio esplicito (così in UI vedi cosa non va)
-                throw IOException("Pagina $pageKey non disponibile (immagine non trovata in pagina.jsp)")
-            }
+            val primaryUrl = imageUrl(key)
+            Log.d("BMP", "fetchBitmap(pageKey=$key) try direct=$primaryUrl")
 
             try {
-                return@withContext fetchBitmapFromUrl(resolvedImgUrl)
-            } catch (e: Exception) {
-                Log.e(TAG, "fetchBitmap resolved FAIL pageKey=$pageKey url=$resolvedImgUrl", e)
-                throw IOException("Pagina $pageKey non disponibile (errore download immagine)")
+                fetchBitmapFromUrl(primaryUrl)
+            } catch (e: IOException) {
+                val msg = e.message.orEmpty()
+                val is404 = msg.contains("HTTP 404", ignoreCase = true)
+
+                if (!is404) {
+                    Log.e(TAG, "fetchBitmap primary FAIL key=$key url=$primaryUrl", e)
+                    throw e
+                }
+
+                // ✅ fallback: pagina.jsp con sub corretta
+                val (page, sub) = parseKey(key)
+                val paginaUrl = paginaJspUrl(page, sub)
+
+                Log.w(TAG, "Direct PNG failed for $key url=$primaryUrl err=$msg")
+                Log.w(TAG, "Trying fallback via pagina.jsp: $paginaUrl")
+
+                val fallbackImageUrl = try {
+                    resolveImageUrlFromPaginaJsp(paginaUrl)
+                } catch (ex: Exception) {
+                    Log.e(TAG, "Fallback resolveImageUrlFromPaginaJsp FAIL key=$key paginaUrl=$paginaUrl", ex)
+                    null
+                }
+
+                Log.d("BMP", "fallbackImageUrl for key=$key -> $fallbackImageUrl")
+
+                if (fallbackImageUrl.isNullOrBlank()) {
+                    throw IOException("Pagina $key non disponibile (immagine non trovata)")
+                }
+
+                try {
+                    fetchBitmapFromUrl(fallbackImageUrl)
+                } catch (ex: Exception) {
+                    Log.e(TAG, "fetchBitmap fallback FAIL key=$key url=$fallbackImageUrl", ex)
+                    throw IOException("Pagina $key non disponibile (errore download immagine)")
+                }
             }
         }
 
     private fun fetchBitmapFromUrl(url: String): Bitmap {
         Log.d("BMP", "fetchBitmapFromUrl url=$url")
+
         val req = Request.Builder().url(url).build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw IOException("HTTP ${resp.code} url=$url")
@@ -145,11 +123,11 @@ class TelevideoRepository(
     }
 
     /**
-     * Scarica l'HTML e prova a prendere l'IMG PNG reale.
-     * Funziona sia per pagina.jsp?pagina=XXX sia per pagina.jsp?p=XXX&s=Y...
+     * Legge pagina.jsp (già costruita con p/s) e prova a ricavare l'URL dell'immagine reale.
      */
     private fun resolveImageUrlFromPaginaJsp(paginaUrl: String): String? {
         val req = Request.Builder().url(paginaUrl).build()
+
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
             val html = resp.body?.string().orEmpty()
@@ -157,12 +135,12 @@ class TelevideoRepository(
 
             val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
 
-            // 1) prima scelta: prima img png
-            val img1 = doc.selectFirst("img[src$=.png], img[src*=.png]")
+            // 1) prima immagine png in pagina
+            val img1 = doc.selectFirst("img[src$=.png]")
             val abs1 = img1?.absUrl("src")?.takeIf { it.isNotBlank() }
             if (!abs1.isNullOrBlank()) return abs1
 
-            // 2) cerca qualunque img con ".png"
+            // 2) qualunque img con ".png"
             val imgs = doc.select("img[src]")
             for (img in imgs) {
                 val src = img.attr("src")
@@ -172,7 +150,7 @@ class TelevideoRepository(
                 }
             }
 
-            // 3) fallback regex dentro html
+            // 3) regex dentro html
             val rx = Regex("""https?://[^\s"'<>]+\.png""", RegexOption.IGNORE_CASE)
             return rx.find(html)?.value
         }

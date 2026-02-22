@@ -10,8 +10,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 // ---------- DataStore ----------
 private val Context.dataStore by preferencesDataStore(name = "sf_televideo_prefs")
@@ -33,7 +37,7 @@ fun TelevideoApp() {
     val bookmarks = remember { mutableStateListOf<Int>() }
     var showBookmarks by remember { mutableStateOf(false) }
 
-    // ✅ per evitare load sovrapposti (swipe veloce)
+    // ✅ job corrente per evitare load paralleli (crash su swipe rapidi)
     var loadJob by remember { mutableStateOf<Job?>(null) }
 
     // ---- Load bookmarks once at startup ----
@@ -43,6 +47,7 @@ fun TelevideoApp() {
             .mapNotNull { it.toIntOrNull() }
             .distinct()
             .sorted()
+
         bookmarks.clear()
         bookmarks.addAll(saved)
     }
@@ -66,6 +71,7 @@ fun TelevideoApp() {
     fun parsePageAndSub(input: String): Pair<String, String>? {
         val cleaned = input.trim()
 
+        // Caso "261-02" o "261/02"
         val sepMatch = Regex("""^\s*([1-8]\d{2})\s*[-/]\s*(\d{1,2})\s*$""").find(cleaned)
         if (sepMatch != null) {
             val pageStr = sepMatch.groupValues[1]
@@ -76,6 +82,7 @@ fun TelevideoApp() {
             return pageStr to subInt.toString().padStart(2, '0')
         }
 
+        // Fallback: prendo solo cifre
         val digits = cleaned.filter { it.isDigit() }
         if (digits.length < 3) return null
 
@@ -94,59 +101,45 @@ fun TelevideoApp() {
      * Carica pagina+sub:
      * - per sub=01: usa "261"
      * - per sub!=01: usa "261-02"
-     *
-     * ✅ FIX: cancella eventuale load precedente e non crasha mai.
      */
     fun load(input: String) {
         val parsed = parsePageAndSub(input) ?: return
         val (page, sub) = parsed
 
-        // ✅ stop load precedente se fai swipe rapido
+        // ✅ cancella eventuale load precedente (swipe rapidi)
         loadJob?.cancel()
 
         loadJob = scope.launch {
             isLoading = true
             errorText = null
 
-            // aggiorna SUBITO lo stato richiesto (UI)
+            // aggiorna SUBITO lo stato richiesto
             currentPage = page
             currentSubpage = sub
 
+            // reset aree
             clickAreas = emptyList()
 
             try {
                 val keyForBitmap = if (sub == "01") page else "$page-$sub"
                 Log.d("TVDBG", "LOAD request input=$input  -> page=$page sub=$sub  keyForBitmap=$keyForBitmap")
 
-                // ✅ supervisorScope: se uno dei due fallisce, non ammazza tutto
-                supervisorScope {
-                    val bmpDeferred = async(Dispatchers.IO) {
-                        repo.fetchBitmap(keyForBitmap)   // può fallire -> gestito da await
-                    }
+                // ✅ async SOLO dentro coroutineScope, e await nello stesso blocco
+                coroutineScope {
+                    val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(keyForBitmap) }
+                    val areasDeferred = async(Dispatchers.IO) { repo.fetchClickAreas(page) }
 
-                    val areasDeferred = async(Dispatchers.IO) {
-                        // aree sempre su "page" (senza sub)
-                        repo.fetchClickAreas(page)
-                    }
-
-                    // bitmap: se fallisce -> va in catch sotto e NON crasha
                     bitmap = bmpDeferred.await()
 
-                    // clickAreas: se fallisce, restano vuote
                     clickAreas = try {
                         areasDeferred.await()
                     } catch (_: Exception) {
                         emptyList()
                     }
                 }
-            } catch (ce: CancellationException) {
-                // normale quando swipe rapido: ignorare
-                Log.d("TVDBG", "LOAD cancelled for input=$input")
             } catch (e: Exception) {
-                Log.e("TVDBG", "LOAD failed input=$input", e)
-                bitmap = null
-                clickAreas = emptyList()
                 errorText = e.message ?: "Unknown error"
+                Log.e("TVDBG", "LOAD error: ${e.message}", e)
             } finally {
                 isLoading = false
             }
@@ -166,10 +159,22 @@ fun TelevideoApp() {
         showBookmarks = showBookmarks,
         onShowBookmarksChange = { showBookmarks = it },
         onLoadPage = { load(it) },
+        onSwipePage = { delta ->
+            val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
+            val next = pageInt + delta
+            if (next in 100..899) {
+                load(next.toString())
+            }
+        },
+        onSwipeSub = { delta ->
+            val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
+            val nextSub = subInt + delta
+            if (nextSub in 1..99) {
+                load("${currentPage}-${nextSub.toString().padStart(2,'0')}")
+            }
+        },
         onAddBookmark = { pageStr ->
-            Log.d("BOOKMARKS", "ADD requested pageStr=$pageStr | current=$currentPage sub=$currentSubpage")
             val n = pageStr.toIntOrNull() ?: return@TelevideoScreen
-            if (n !in 100..899) return@TelevideoScreen
             if (!bookmarks.contains(n)) {
                 bookmarks.add(n)
                 bookmarks.sort()
