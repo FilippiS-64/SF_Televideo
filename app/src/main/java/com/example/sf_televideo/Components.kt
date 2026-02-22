@@ -36,32 +36,46 @@ import kotlin.math.abs
 
 @Composable
 fun ToolbarButton(label: String, onClick: () -> Unit) {
-    TextButton(onClick = onClick) {
+    TextButton(
+        onClick = onClick,
+        // ✅ più compatto: padding interno ridotto
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+        // ✅ altezza controllata
+        modifier = Modifier.height(32.dp)
+    ) {
         Text(
             text = label,
             fontFamily = FontFamily.Monospace,
             color = Color.White,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            // ✅ testo un filo più piccolo (senza stravolgere)
+            fontSize = 12.sp,
+            maxLines = 1
         )
     }
 }
 
 @Composable
 fun StarButton(onTap: () -> Unit, onLongPress: () -> Unit) {
-    Text(
-        text = "★",
-        color = Color.White,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 20.sp,
+    // ✅ allineata in altezza ai bottoni, con padding ridotto
+    Box(
         modifier = Modifier
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-            .pointerInput(Unit) {
+            .height(32.dp)
+            .padding(horizontal = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "★",
+            color = Color.White,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 18.sp,
+            modifier = Modifier.pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { onTap() },
                     onLongPress = { onLongPress() }
                 )
             }
-    )
+        )
+    }
 }
 
 @Composable

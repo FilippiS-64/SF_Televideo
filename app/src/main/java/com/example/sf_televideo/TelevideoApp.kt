@@ -172,14 +172,17 @@ fun TelevideoApp() {
 
     TelevideoScreen(
         currentPage = currentPage,
-        currentSubpage = currentSubpage,
         bitmap = bitmap,
         clickAreas = clickAreas,
         isLoading = isLoading,
         errorText = errorText,
         bookmarks = bookmarks,
         showBookmarks = showBookmarks,
-        onShowBookmarksChange = { showBookmarks = it },
+        onShowBookmarksChange = { value ->
+            if (showBookmarks != value) {
+                showBookmarks = value
+            }
+        },
         onLoadPage = { load(it) },
 
         // ✅ SWIPE PAGINA: CICLICO 100..899
