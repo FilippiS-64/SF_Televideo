@@ -29,6 +29,46 @@ fun TelevideoScreen(
     onSwipePage: (Int) -> Unit,
     onSwipeSub: (Int) -> Unit
 ) {
+    // --- Swipe ciclico (100..899) a scatto ---
+    fun parsePageOrDefault(): Int {
+        // se currentPage non è numerico, ripiega su 100
+        return currentPage.toIntOrNull() ?: 100
+    }
+
+    fun normalizeToRange(p: Int): Int {
+        // se per qualunque motivo esci dal range, ti riporta dentro (fallback robusto)
+        return when {
+            p < 100 -> 100
+            p > 899 -> 899
+            else -> p
+        }
+    }
+
+    fun nextPage(current: Int): Int {
+        val c = normalizeToRange(current)
+        return if (c >= 899) 100 else c + 1
+    }
+
+    fun previousPage(current: Int): Int {
+        val c = normalizeToRange(current)
+        return if (c <= 100) 899 else c - 1
+    }
+
+    fun formatPage(p: Int): String = String.format("%03d", p)
+
+    fun handleSwipePage(delta: Int) {
+        if (delta == 0) return
+        val cur = parsePageOrDefault()
+        val newPage = if (delta > 0) nextPage(cur) else previousPage(cur)
+        onLoadPage(formatPage(newPage))
+    }
+
+    // Per ora lasciamo lo swipe subpage demandato al callback esterno (come prima).
+    fun handleSwipeSub(delta: Int) {
+        onSwipeSub(delta)
+    }
+    // --- fine swipe ciclico ---
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -70,7 +110,7 @@ fun TelevideoScreen(
                 onDismiss = { onShowBookmarksChange(false) },
                 onSelect = { p ->
                     onShowBookmarksChange(false)
-                    onLoadPage(p.toString())
+                    onLoadPage(formatPage(p)) // ✅ garantisce 3 cifre anche dai bookmark
                 },
                 onRemove = { onRemoveBookmark(it) }
             )
@@ -98,8 +138,10 @@ fun TelevideoScreen(
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
                     onTapArea = { onLoadPage(it.page) },
-                    onSwipePage = { delta -> onSwipePage(delta) },
-                    onSwipeSub = { delta -> onSwipeSub(delta) },
+                    // ✅ swipe pagina: ora lo gestiamo qui, ciclico 100..899 e a scatto
+                    onSwipePage = { delta -> handleSwipePage(delta) },
+                    // ✅ swipe subpage: lasciamo come prima (se poi vuoi, lo rendiamo ciclico anche per le sub)
+                    onSwipeSub = { delta -> handleSwipeSub(delta) },
                     debug = false
                 )
             }

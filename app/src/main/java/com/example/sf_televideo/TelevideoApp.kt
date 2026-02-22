@@ -146,6 +146,28 @@ fun TelevideoApp() {
         }
     }
 
+    // ----------------------------
+    // ✅ Helpers per swipe ciclici
+    // ----------------------------
+    fun fmtPage(p: Int): String = p.toString().padStart(3, '0')
+    fun fmtSub(s: Int): String = s.toString().padStart(2, '0')
+
+    fun nextPageCyclic(cur: Int): Int = if (cur >= 899) 100 else cur + 1
+    fun prevPageCyclic(cur: Int): Int = if (cur <= 100) 899 else cur - 1
+
+    /**
+     * Qui mettiamo la “conoscenza” sulle sottopagine.
+     * Per ora: 102 ha 11 sottopagine. Le altre, per sicurezza, 1.
+     * (Così non proviamo a caricare sottopagine che non esistono.)
+     */
+    fun maxSubpagesFor(pageInt: Int): Int = when (pageInt) {
+        102 -> 11
+        else -> 1
+    }
+
+    fun nextSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub >= maxSub) 1 else curSub + 1
+    fun prevSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub <= 1) maxSub else curSub - 1
+
     LaunchedEffect(Unit) { load("100") }
 
     TelevideoScreen(
@@ -159,20 +181,42 @@ fun TelevideoApp() {
         showBookmarks = showBookmarks,
         onShowBookmarksChange = { showBookmarks = it },
         onLoadPage = { load(it) },
+
+        // ✅ SWIPE PAGINA: CICLICO 100..899
         onSwipePage = { delta ->
             val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
-            val next = pageInt + delta
-            if (next in 100..899) {
-                load(next.toString())
+            val cur = pageInt.coerceIn(100, 899)
+
+            val next = when {
+                delta > 0 -> nextPageCyclic(cur)
+                delta < 0 -> prevPageCyclic(cur)
+                else -> cur
             }
+
+            // Quando cambi pagina, torniamo alla sub 01 (comportamento più pulito)
+            load(fmtPage(next)) // parsePageAndSub -> sub=01 automaticamente
         },
+
+        // ✅ SWIPE SUB: CICLICO 01..maxSubpages (es. 102: 01 -> swipe giù -> 11)
         onSwipeSub = { delta ->
+            val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
+            val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
+
+            // Se la pagina non ha sottopagine (max=1), ignoriamo lo swipe sub
+            if (maxSub == 1) return@TelevideoScreen
+
             val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
-            val nextSub = subInt + delta
-            if (nextSub in 1..99) {
-                load("${currentPage}-${nextSub.toString().padStart(2,'0')}")
+            val curSub = subInt.coerceIn(1, maxSub)
+
+            val nextSub = when {
+                delta > 0 -> nextSubCyclic(curSub, maxSub)
+                delta < 0 -> prevSubCyclic(curSub, maxSub)
+                else -> curSub
             }
+
+            load("${fmtPage(pageInt)}-${fmtSub(nextSub)}")
         },
+
         onAddBookmark = { pageStr ->
             val n = pageStr.toIntOrNull() ?: return@TelevideoScreen
             if (!bookmarks.contains(n)) {
