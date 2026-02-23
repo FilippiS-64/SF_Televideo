@@ -24,7 +24,6 @@ private fun PageKeypadDialog(
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
-    // ✅ ora parte VUOTO
     var digits by remember { mutableStateOf("") }
 
     fun tryAutoConfirmIfComplete() {
@@ -33,13 +32,11 @@ private fun PageKeypadDialog(
         if (n in 100..899) {
             onConfirm(digits)
         }
-        // se non valido, resta aperto e l'utente può correggere (C o backspace)
     }
 
     fun appendDigit(d: Char) {
         if (digits.length < 3) {
             digits += d
-            // ✅ auto-conferma alla terza cifra
             tryAutoConfirmIfComplete()
         }
     }
@@ -128,7 +125,6 @@ private fun PageKeypadDialog(
                 )
             }
         },
-        // ✅ OK non necessario: lo tolgo proprio
         confirmButton = { },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Chiudi") }
@@ -185,13 +181,11 @@ fun TelevideoScreen(
 ) {
     var showKeypad by remember { mutableStateOf(false) }
 
-    // Toast/box "pagina salvata" (in alto)
     val scope = rememberCoroutineScope()
     var showSaved by remember { mutableStateOf(false) }
     var savedText by remember { mutableStateOf("") }
 
     fun pageForToast(p: String): String {
-        // Solo estetica del testo. NON tocca il valore salvato nei bookmark.
         val n = p.toIntOrNull()
         return if (n != null) String.format("%03d", n) else p
     }
@@ -253,7 +247,6 @@ fun TelevideoScreen(
                 ) {
                     StarButton(
                         onTap = { onShowBookmarksChange(true) },
-                        // ✅ non salva più: spostato sul long-press sulla pagina
                         onLongPress = { }
                     )
 
@@ -264,7 +257,7 @@ fun TelevideoScreen(
                     ToolbarButton("201") { onLoadPage("201") }
                     ToolbarButton("260") { onLoadPage("260") }
 
-                    ToolbarButton("###") { showKeypad = true }
+                    // ✅ RIMOSSO: ToolbarButton("###") { showKeypad = true }
                 }
             },
             actions = { },
@@ -321,16 +314,22 @@ fun TelevideoScreen(
                     onTapArea = { onLoadPage(it.page) },
                     onSwipePage = { delta -> handleSwipePage(delta) },
                     onSwipeSub = { delta -> handleSwipeSub(delta) },
+
                     // ✅ long-press sulla pagina salva bookmark + overlay in alto
                     onLongPressPage = {
-                        onAddBookmark(currentPage)     // salva SOLO pagina (come vuoi tu)
+                        onAddBookmark(currentPage)
                         showSavedToast(currentPage)
                     },
+
+                    // ✅ doppio tap sulla pagina apre il keypad
+                    onDoubleTapPage = {
+                        showKeypad = true
+                    },
+
                     debug = false
                 )
             }
 
-            // ✅ overlay in alto
             BookmarkSavedTopOverlay(
                 visible = showSaved,
                 text = savedText

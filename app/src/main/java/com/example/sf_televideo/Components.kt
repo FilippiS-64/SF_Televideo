@@ -37,16 +37,13 @@ import kotlin.math.abs
 fun ToolbarButton(label: String, onClick: () -> Unit) {
     TextButton(
         onClick = onClick,
-        // ✅ più compatto: padding interno ridotto
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-        // ✅ altezza controllata
         modifier = Modifier.height(32.dp)
     ) {
         Text(
             text = label,
             fontFamily = FontFamily.Monospace,
             color = Color.White,
-            // ✅ testo un filo più piccolo (senza stravolgere)
             fontSize = 12.sp,
             maxLines = 1
         )
@@ -55,7 +52,6 @@ fun ToolbarButton(label: String, onClick: () -> Unit) {
 
 @Composable
 fun StarButton(onTap: () -> Unit, onLongPress: () -> Unit) {
-    // ✅ allineata in altezza ai bottoni, con padding ridotto
     Box(
         modifier = Modifier
             .height(32.dp)
@@ -115,7 +111,6 @@ fun BookmarksDialog(
                                 fontSize = 12.sp
                             )
                         }
-                        // Se vuoi eliminare warning: puoi sostituire con HorizontalDivider()
                         Divider()
                     }
                 }
@@ -143,14 +138,12 @@ fun TelevideoImage(
     onTapArea: (ClickArea) -> Unit,
     onSwipePage: (delta: Int) -> Unit,
     onSwipeSub: (delta: Int) -> Unit,
-    onLongPressPage: (() -> Unit)? = null,   // ✅ NEW
+    onLongPressPage: (() -> Unit)? = null,
+    onDoubleTapPage: (() -> Unit)? = null,   // ✅ NEW
     debug: Boolean = false
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
 
-    // ------------------------------------------------------------
-    // Correzione automatica della scala orizzontale (X)
-    // ------------------------------------------------------------
     val correctedAreas = remember(bitmap.width, clickAreas) {
         if (clickAreas.isEmpty()) return@remember emptyList<ClickArea>()
 
@@ -205,7 +198,6 @@ fun TelevideoImage(
                     totalY = 0f
                 },
                 onDrag = { change, dragAmount ->
-                    // ✅ compatibile con la tua versione (anche se deprecato)
                     change.consumeAllChanges()
                     totalX += dragAmount.x
                     totalY += dragAmount.y
@@ -228,8 +220,8 @@ fun TelevideoImage(
                 }
             )
         }
-        // 2) TAP aree cliccabili + LONG PRESS pagina
-        .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage) {
+        // 2) TAP aree cliccabili + LONG PRESS pagina + DOUBLE TAP pagina
+        .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage, onDoubleTapPage) {
             detectTapGestures(
                 onTap = { tap: Offset ->
                     val vw = size.width
@@ -273,8 +265,10 @@ fun TelevideoImage(
                     }
                 },
                 onLongPress = {
-                    // ✅ Long-press OVUNQUE sulla pagina -> bookmark (gestito dal caller)
                     onLongPressPage?.invoke()
+                },
+                onDoubleTap = {
+                    onDoubleTapPage?.invoke()
                 }
             )
         }
