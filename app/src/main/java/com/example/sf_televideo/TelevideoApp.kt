@@ -208,7 +208,7 @@ fun TelevideoApp() {
     // ✅ Primo load: piccola delay per evitare glitch iniziale emulatore (la tua pagina 100 “sparisce”)
     LaunchedEffect(Unit) {
         delay(80)
-        load("100", pushToHistory = false)
+        load("101", pushToHistory = false)
     }
 
     // ✅ Box per poter mettere l'overlay sopra la UI
