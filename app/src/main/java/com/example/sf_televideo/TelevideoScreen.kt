@@ -178,7 +178,7 @@ fun TelevideoScreen(
     onRemoveBookmark: (Int) -> Unit,
     onSwipePage: (Int) -> Unit,
     onSwipeSub: (Int) -> Unit,
-    onUndo: () -> Unit                 // ✅ NUOVO
+    onUndo: () -> Unit                 // ✅ resta, ma NON c’è più il bottone
 ) {
     var showKeypad by remember { mutableStateOf(false) }
 
@@ -200,32 +200,7 @@ fun TelevideoScreen(
         }
     }
 
-    fun parsePageOrDefault(): Int = currentPage.toIntOrNull() ?: 100
-    fun normalizeToRange(p: Int): Int = when {
-        p < 100 -> 100
-        p > 899 -> 899
-        else -> p
-    }
-    fun nextPage(current: Int): Int {
-        val c = normalizeToRange(current)
-        return if (c >= 899) 100 else c + 1
-    }
-    fun previousPage(current: Int): Int {
-        val c = normalizeToRange(current)
-        return if (c <= 100) 899 else c - 1
-    }
     fun formatPage(p: Int): String = String.format("%03d", p)
-
-    fun handleSwipePage(delta: Int) {
-        if (delta == 0) return
-        val cur = parsePageOrDefault()
-        val newPage = if (delta > 0) nextPage(cur) else previousPage(cur)
-        onLoadPage(formatPage(newPage))
-    }
-
-    fun handleSwipeSub(delta: Int) {
-        onSwipeSub(delta)
-    }
 
     Column(
         modifier = Modifier
@@ -253,12 +228,7 @@ fun TelevideoScreen(
                     ToolbarButton("260") { onLoadPage("260") }
                 }
             },
-            actions = {
-                // ✅ Undo in TopBar (sempre testabile)
-                TextButton(onClick = onUndo) {
-                    Text("↩ Undo", color = Color.White, fontFamily = FontFamily.Monospace)
-                }
-            },
+            actions = { /* niente undo button */ },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = Color(0xFF101010),
                 titleContentColor = Color.White,
@@ -310,8 +280,8 @@ fun TelevideoScreen(
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
                     onTapArea = { onLoadPage(it.page) },
-                    onSwipePage = { delta -> handleSwipePage(delta) },
-                    onSwipeSub = { delta -> handleSwipeSub(delta) },
+                    onSwipePage = { delta -> onSwipePage(delta) },
+                    onSwipeSub = { delta -> onSwipeSub(delta) },
 
                     onLongPressPage = {
                         onAddBookmark(currentPage)
@@ -320,6 +290,11 @@ fun TelevideoScreen(
 
                     onDoubleTapPage = {
                         showKeypad = true
+                    },
+
+                    // ✅ ECCO L’UNDO: tap a due dita
+                    onTwoFingerTapPage = {
+                        onUndo()
                     },
 
                     debug = false

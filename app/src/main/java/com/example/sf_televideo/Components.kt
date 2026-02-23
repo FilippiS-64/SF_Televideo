@@ -2,9 +2,12 @@ package com.example.sf_televideo
 
 import android.graphics.Bitmap
 import android.graphics.Paint
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -20,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.consumeAllChanges
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -136,6 +140,7 @@ fun TelevideoImage(
     onSwipeSub: (delta: Int) -> Unit,
     onLongPressPage: (() -> Unit)? = null,
     onDoubleTapPage: (() -> Unit)? = null,
+    onTwoFingerTapPage: (() -> Unit)? = null,   // ✅ UNDO gesture (tap 2 dita)
     debug: Boolean = false
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
@@ -183,6 +188,79 @@ fun TelevideoImage(
     val imgModifier = Modifier
         .fillMaxWidth()
         .aspectRatio(bitmap.width.toFloat() / (bitmap.height.toFloat() * stretchY))
+
+        // 0) TAP A DUE DITA (UNDO) — NIENTE awaitPointerEventScope: usiamo awaitEachGesture direttamente
+        .pointerInput(onTwoFingerTapPage) {
+            if (onTwoFingerTapPage == null) return@pointerInput
+
+            awaitEachGesture {
+                val down1 = awaitFirstDown(requireUnconsumed = false)
+                val id1 = down1.id
+                val start1 = down1.position
+
+                val t0 = SystemClock.uptimeMillis()
+                val maxDurationMs = 320L   // un filo più permissivo del 260
+
+                val slop = viewConfiguration.touchSlop
+                var maxMove = 0f
+
+                var id2: PointerId? = null
+                var start2: Offset? = null
+                var hadTwoFingers = false
+
+                var up1 = false
+                var up2 = false
+
+                while (true) {
+                    // ✅ questa è disponibile qui (AwaitPointerEventScope)
+                    val event = awaitPointerEvent()
+
+                    if (SystemClock.uptimeMillis() - t0 > maxDurationMs) break
+
+                    // aggancia secondo dito se arriva
+                    if (id2 == null) {
+                        val second = event.changes.firstOrNull { it.id != id1 && it.pressed }
+                        if (second != null) {
+                            id2 = second.id
+                            start2 = second.position
+                            hadTwoFingers = true
+                        }
+                    }
+
+                    // dito 1
+                    val c1 = event.changes.firstOrNull { it.id == id1 }
+                    if (c1 != null) {
+                        maxMove = maxOf(maxMove, (c1.position - start1).getDistance())
+                        if (!c1.pressed) up1 = true
+                    } else {
+                        up1 = true
+                    }
+
+                    // dito 2
+                    if (id2 != null && start2 != null) {
+                        val c2 = event.changes.firstOrNull { it.id == id2 }
+                        if (c2 != null) {
+                            maxMove = maxOf(maxMove, (c2.position - start2!!).getDistance())
+                            if (!c2.pressed) up2 = true
+                        } else {
+                            up2 = true
+                        }
+                    }
+
+                    // troppo movimento -> non è tap
+                    if (maxMove > slop) break
+
+                    // successo
+                    if (hadTwoFingers && up1 && up2) {
+                        event.changes.forEach { it.consumeAllChanges() }
+                        if (debug) Log.d("TVDBG", "TwoFingerTap -> UNDO")
+                        onTwoFingerTapPage.invoke()
+                        break
+                    }
+                }
+            }
+        }
+
         // 1) DRAG (swipe)
         .pointerInput(bitmap, stretchY) {
             var totalX = 0f
@@ -216,6 +294,7 @@ fun TelevideoImage(
                 }
             )
         }
+
         // 2) TAP aree cliccabili + LONG PRESS pagina + DOUBLE TAP pagina
         .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage, onDoubleTapPage) {
             detectTapGestures(
@@ -260,12 +339,8 @@ fun TelevideoImage(
                         onTapArea(safeHit)
                     }
                 },
-                onLongPress = {
-                    onLongPressPage?.invoke()
-                },
-                onDoubleTap = {
-                    onDoubleTapPage?.invoke()
-                }
+                onLongPress = { onLongPressPage?.invoke() },
+                onDoubleTap = { onDoubleTapPage?.invoke() }
             )
         }
 

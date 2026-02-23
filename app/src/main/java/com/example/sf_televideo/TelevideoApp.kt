@@ -5,7 +5,11 @@ package com.example.sf_televideo
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -37,6 +41,9 @@ fun TelevideoApp() {
 
     val bookmarks = remember { mutableStateListOf<Int>() }
     var showBookmarks by remember { mutableStateOf(false) }
+
+    // ✅ Splash help: SEMPRE ad ogni avvio app
+    var showHelp by rememberSaveable { mutableStateOf(true) }
 
     // ✅ job corrente per evitare load paralleli (crash su swipe rapidi)
     var loadJob by remember { mutableStateOf<Job?>(null) }
@@ -204,65 +211,75 @@ fun TelevideoApp() {
         load("100", pushToHistory = false)
     }
 
-    TelevideoScreen(
-        currentPage = currentPage,
-        bitmap = bitmap,
-        clickAreas = clickAreas,
-        isLoading = isLoading,
-        errorText = errorText,
-        bookmarks = bookmarks,
-        showBookmarks = showBookmarks,
-        onShowBookmarksChange = { value ->
-            if (showBookmarks != value) showBookmarks = value
-        },
-        onLoadPage = { load(it, pushToHistory = true) },
+    // ✅ Box per poter mettere l'overlay sopra la UI
+    Box(modifier = Modifier.fillMaxSize()) {
 
-        // ✅ SWIPE PAGINA: CICLICO 100..899 (e va in history)
-        onSwipePage = { delta ->
-            val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
-            val cur = pageInt.coerceIn(100, 899)
+        TelevideoScreen(
+            currentPage = currentPage,
+            bitmap = bitmap,
+            clickAreas = clickAreas,
+            isLoading = isLoading,
+            errorText = errorText,
+            bookmarks = bookmarks,
+            showBookmarks = showBookmarks,
+            onShowBookmarksChange = { value ->
+                if (showBookmarks != value) showBookmarks = value
+            },
+            onLoadPage = { load(it, pushToHistory = true) },
 
-            val next = when {
-                delta > 0 -> nextPageCyclic(cur)
-                delta < 0 -> prevPageCyclic(cur)
-                else -> cur
-            }
-            load(fmtPage(next), pushToHistory = true)
-        },
+            // ✅ SWIPE PAGINA: CICLICO 100..899 (e va in history)
+            onSwipePage = { delta ->
+                val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
+                val cur = pageInt.coerceIn(100, 899)
 
-        // ✅ SWIPE SUB: CICLICO 01..maxSubpages (e va in history)
-        onSwipeSub = { delta ->
-            val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
-            val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
+                val next = when {
+                    delta > 0 -> nextPageCyclic(cur)
+                    delta < 0 -> prevPageCyclic(cur)
+                    else -> cur
+                }
+                load(fmtPage(next), pushToHistory = true)
+            },
 
-            if (maxSub == 1) return@TelevideoScreen
+            // ✅ SWIPE SUB: CICLICO 01..maxSubpages (e va in history)
+            onSwipeSub = { delta ->
+                val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
+                val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
 
-            val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
-            val curSub = subInt.coerceIn(1, maxSub)
+                if (maxSub == 1) return@TelevideoScreen
 
-            val nextSub = when {
-                delta > 0 -> nextSubCyclic(curSub, maxSub)
-                delta < 0 -> prevSubCyclic(curSub, maxSub)
-                else -> curSub
-            }
-            load("${fmtPage(pageInt)}-${fmtSub(nextSub)}", pushToHistory = true)
-        },
+                val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
+                val curSub = subInt.coerceIn(1, maxSub)
 
-        onAddBookmark = { pageStr ->
-            val n = pageStr.toIntOrNull() ?: return@TelevideoScreen
-            if (!bookmarks.contains(n)) {
-                bookmarks.add(n)
-                bookmarks.sort()
-                persistBookmarks()
-            }
-        },
-        onRemoveBookmark = { n ->
-            if (bookmarks.remove(n)) {
-                persistBookmarks()
-            }
-        },
+                val nextSub = when {
+                    delta > 0 -> nextSubCyclic(curSub, maxSub)
+                    delta < 0 -> prevSubCyclic(curSub, maxSub)
+                    else -> curSub
+                }
+                load("${fmtPage(pageInt)}-${fmtSub(nextSub)}", pushToHistory = true)
+            },
 
-        // ✅ UNDO (TopBar)
-        onUndo = { undo() }
-    )
+            onAddBookmark = { pageStr ->
+                val n = pageStr.toIntOrNull() ?: return@TelevideoScreen
+                if (!bookmarks.contains(n)) {
+                    bookmarks.add(n)
+                    bookmarks.sort()
+                    persistBookmarks()
+                }
+            },
+            onRemoveBookmark = { n ->
+                if (bookmarks.remove(n)) {
+                    persistBookmarks()
+                }
+            },
+
+            // ✅ Undo: lo usi per il TAP a 2 dita (NON per bottone)
+            onUndo = { undo() }
+        )
+
+        // ✅ Splash semitrasparente: ogni avvio, chiusura manuale con OK
+        GestureHelpOverlay(
+            visible = showHelp,
+            onDismiss = { showHelp = false }
+        )
+    }
 }
