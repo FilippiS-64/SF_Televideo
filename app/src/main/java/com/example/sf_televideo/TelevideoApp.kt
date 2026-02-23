@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -39,6 +40,10 @@ fun TelevideoApp() {
 
     // ✅ job corrente per evitare load paralleli (crash su swipe rapidi)
     var loadJob by remember { mutableStateOf<Job?>(null) }
+
+    // ✅ History per UNDO (salviamo la "chiave" usata per caricare bitmap: "261" oppure "261-02")
+    val history = remember { mutableStateListOf<String>() }
+    var isUndoing by remember { mutableStateOf(false) }
 
     // ---- Load bookmarks once at startup ----
     LaunchedEffect(Unit) {
@@ -97,17 +102,32 @@ fun TelevideoApp() {
         return pageStr to subInt.toString().padStart(2, '0')
     }
 
+    fun keyFor(page: String, sub: String): String =
+        if (sub == "01") page else "$page-$sub"
+
     /**
-     * Carica pagina+sub:
-     * - per sub=01: usa "261"
-     * - per sub!=01: usa "261-02"
+     * Carica pagina+sub.
+     * pushToHistory = true => salva lo stato precedente per UNDO
      */
-    fun load(input: String) {
+    fun load(input: String, pushToHistory: Boolean = true) {
         val parsed = parsePageAndSub(input) ?: return
         val (page, sub) = parsed
 
         // ✅ cancella eventuale load precedente (swipe rapidi)
         loadJob?.cancel()
+
+        val newKey = keyFor(page, sub)
+        val prevKey = keyFor(currentPage, currentSubpage)
+
+        // ✅ push history SOLO se:
+        // - non siamo in undo
+        // - pushToHistory true
+        // - stiamo davvero cambiando pagina/sub
+        if (!isUndoing && pushToHistory && newKey != prevKey) {
+            history.add(prevKey)
+            if (history.size > 80) history.removeAt(0) // cap per sicurezza
+            Log.d("TVDBG", "HISTORY push $prevKey  (size=${history.size})")
+        }
 
         loadJob = scope.launch {
             isLoading = true
@@ -121,12 +141,10 @@ fun TelevideoApp() {
             clickAreas = emptyList()
 
             try {
-                val keyForBitmap = if (sub == "01") page else "$page-$sub"
-                Log.d("TVDBG", "LOAD request input=$input  -> page=$page sub=$sub  keyForBitmap=$keyForBitmap")
+                Log.d("TVDBG", "LOAD request input=$input  -> page=$page sub=$sub  key=$newKey")
 
-                // ✅ async SOLO dentro coroutineScope, e await nello stesso blocco
                 coroutineScope {
-                    val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(keyForBitmap) }
+                    val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(newKey) }
                     val areasDeferred = async(Dispatchers.IO) { repo.fetchClickAreas(page) }
 
                     bitmap = bmpDeferred.await()
@@ -142,8 +160,21 @@ fun TelevideoApp() {
                 Log.e("TVDBG", "LOAD error: ${e.message}", e)
             } finally {
                 isLoading = false
+                isUndoing = false
             }
         }
+    }
+
+    fun undo() {
+        if (history.isEmpty()) {
+            Log.d("TVDBG", "UNDO: history empty")
+            return
+        }
+        val prev = history.removeAt(history.lastIndex)
+        Log.d("TVDBG", "UNDO -> $prev (remaining=${history.size})")
+
+        isUndoing = true
+        load(prev, pushToHistory = false)
     }
 
     // ----------------------------
@@ -156,9 +187,8 @@ fun TelevideoApp() {
     fun prevPageCyclic(cur: Int): Int = if (cur <= 100) 899 else cur - 1
 
     /**
-     * Qui mettiamo la “conoscenza” sulle sottopagine.
-     * Per ora: 102 ha 11 sottopagine. Le altre, per sicurezza, 1.
-     * (Così non proviamo a caricare sottopagine che non esistono.)
+     * Conoscenza sulle sottopagine.
+     * Per ora: 102 ha 11 sottopagine. Le altre 1.
      */
     fun maxSubpagesFor(pageInt: Int): Int = when (pageInt) {
         102 -> 11
@@ -168,7 +198,11 @@ fun TelevideoApp() {
     fun nextSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub >= maxSub) 1 else curSub + 1
     fun prevSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub <= 1) maxSub else curSub - 1
 
-    LaunchedEffect(Unit) { load("100") }
+    // ✅ Primo load: piccola delay per evitare glitch iniziale emulatore (la tua pagina 100 “sparisce”)
+    LaunchedEffect(Unit) {
+        delay(80)
+        load("100", pushToHistory = false)
+    }
 
     TelevideoScreen(
         currentPage = currentPage,
@@ -179,13 +213,11 @@ fun TelevideoApp() {
         bookmarks = bookmarks,
         showBookmarks = showBookmarks,
         onShowBookmarksChange = { value ->
-            if (showBookmarks != value) {
-                showBookmarks = value
-            }
+            if (showBookmarks != value) showBookmarks = value
         },
-        onLoadPage = { load(it) },
+        onLoadPage = { load(it, pushToHistory = true) },
 
-        // ✅ SWIPE PAGINA: CICLICO 100..899
+        // ✅ SWIPE PAGINA: CICLICO 100..899 (e va in history)
         onSwipePage = { delta ->
             val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
             val cur = pageInt.coerceIn(100, 899)
@@ -195,17 +227,14 @@ fun TelevideoApp() {
                 delta < 0 -> prevPageCyclic(cur)
                 else -> cur
             }
-
-            // Quando cambi pagina, torniamo alla sub 01 (comportamento più pulito)
-            load(fmtPage(next)) // parsePageAndSub -> sub=01 automaticamente
+            load(fmtPage(next), pushToHistory = true)
         },
 
-        // ✅ SWIPE SUB: CICLICO 01..maxSubpages (es. 102: 01 -> swipe giù -> 11)
+        // ✅ SWIPE SUB: CICLICO 01..maxSubpages (e va in history)
         onSwipeSub = { delta ->
             val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
             val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
 
-            // Se la pagina non ha sottopagine (max=1), ignoriamo lo swipe sub
             if (maxSub == 1) return@TelevideoScreen
 
             val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
@@ -216,8 +245,7 @@ fun TelevideoApp() {
                 delta < 0 -> prevSubCyclic(curSub, maxSub)
                 else -> curSub
             }
-
-            load("${fmtPage(pageInt)}-${fmtSub(nextSub)}")
+            load("${fmtPage(pageInt)}-${fmtSub(nextSub)}", pushToHistory = true)
         },
 
         onAddBookmark = { pageStr ->
@@ -232,6 +260,9 @@ fun TelevideoApp() {
             if (bookmarks.remove(n)) {
                 persistBookmarks()
             }
-        }
+        },
+
+        // ✅ UNDO (TopBar)
+        onUndo = { undo() }
     )
 }

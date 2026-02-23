@@ -177,7 +177,8 @@ fun TelevideoScreen(
     onAddBookmark: (String) -> Unit,
     onRemoveBookmark: (Int) -> Unit,
     onSwipePage: (Int) -> Unit,
-    onSwipeSub: (Int) -> Unit
+    onSwipeSub: (Int) -> Unit,
+    onUndo: () -> Unit                 // ✅ NUOVO
 ) {
     var showKeypad by remember { mutableStateOf(false) }
 
@@ -199,25 +200,20 @@ fun TelevideoScreen(
         }
     }
 
-    // --- Swipe ciclico (100..899) a scatto ---
     fun parsePageOrDefault(): Int = currentPage.toIntOrNull() ?: 100
-
     fun normalizeToRange(p: Int): Int = when {
         p < 100 -> 100
         p > 899 -> 899
         else -> p
     }
-
     fun nextPage(current: Int): Int {
         val c = normalizeToRange(current)
         return if (c >= 899) 100 else c + 1
     }
-
     fun previousPage(current: Int): Int {
         val c = normalizeToRange(current)
         return if (c <= 100) 899 else c - 1
     }
-
     fun formatPage(p: Int): String = String.format("%03d", p)
 
     fun handleSwipePage(delta: Int) {
@@ -230,7 +226,6 @@ fun TelevideoScreen(
     fun handleSwipeSub(delta: Int) {
         onSwipeSub(delta)
     }
-    // --- fine swipe ciclico ---
 
     Column(
         modifier = Modifier
@@ -256,11 +251,14 @@ fun TelevideoScreen(
 
                     ToolbarButton("201") { onLoadPage("201") }
                     ToolbarButton("260") { onLoadPage("260") }
-
-                    // ✅ RIMOSSO: ToolbarButton("###") { showKeypad = true }
                 }
             },
-            actions = { },
+            actions = {
+                // ✅ Undo in TopBar (sempre testabile)
+                TextButton(onClick = onUndo) {
+                    Text("↩ Undo", color = Color.White, fontFamily = FontFamily.Monospace)
+                }
+            },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = Color(0xFF101010),
                 titleContentColor = Color.White,
@@ -315,13 +313,11 @@ fun TelevideoScreen(
                     onSwipePage = { delta -> handleSwipePage(delta) },
                     onSwipeSub = { delta -> handleSwipeSub(delta) },
 
-                    // ✅ long-press sulla pagina salva bookmark + overlay in alto
                     onLongPressPage = {
                         onAddBookmark(currentPage)
                         showSavedToast(currentPage)
                     },
 
-                    // ✅ doppio tap sulla pagina apre il keypad
                     onDoubleTapPage = {
                         showKeypad = true
                     },

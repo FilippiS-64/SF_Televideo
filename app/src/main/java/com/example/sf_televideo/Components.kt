@@ -11,11 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -24,14 +20,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumeAllChanges
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.roundToInt
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun ToolbarButton(label: String, onClick: () -> Unit) {
@@ -139,7 +135,7 @@ fun TelevideoImage(
     onSwipePage: (delta: Int) -> Unit,
     onSwipeSub: (delta: Int) -> Unit,
     onLongPressPage: (() -> Unit)? = null,
-    onDoubleTapPage: (() -> Unit)? = null,   // ✅ NEW
+    onDoubleTapPage: (() -> Unit)? = null,
     debug: Boolean = false
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
