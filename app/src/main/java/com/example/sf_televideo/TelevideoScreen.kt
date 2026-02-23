@@ -3,6 +3,9 @@
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -13,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 private fun PageKeypadDialog(
@@ -132,6 +137,37 @@ private fun PageKeypadDialog(
 }
 
 @Composable
+private fun BookmarkSavedTopOverlay(
+    visible: Boolean,
+    text: String
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Surface(
+                tonalElevation = 6.dp,
+                shape = MaterialTheme.shapes.large,
+                color = Color(0xCC000000),
+                modifier = Modifier.padding(top = 10.dp)
+            ) {
+                Text(
+                    text = text,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun TelevideoScreen(
     currentPage: String,
     bitmap: Bitmap?,
@@ -148,6 +184,26 @@ fun TelevideoScreen(
     onSwipeSub: (Int) -> Unit
 ) {
     var showKeypad by remember { mutableStateOf(false) }
+
+    // Toast/box "pagina salvata" (in alto)
+    val scope = rememberCoroutineScope()
+    var showSaved by remember { mutableStateOf(false) }
+    var savedText by remember { mutableStateOf("") }
+
+    fun pageForToast(p: String): String {
+        // Solo estetica del testo. NON tocca il valore salvato nei bookmark.
+        val n = p.toIntOrNull()
+        return if (n != null) String.format("%03d", n) else p
+    }
+
+    fun showSavedToast(page: String) {
+        savedText = "Pagina ${pageForToast(page)} salvata"
+        showSaved = true
+        scope.launch {
+            delay(1200)
+            showSaved = false
+        }
+    }
 
     // --- Swipe ciclico (100..899) a scatto ---
     fun parsePageOrDefault(): Int = currentPage.toIntOrNull() ?: 100
@@ -197,7 +253,8 @@ fun TelevideoScreen(
                 ) {
                     StarButton(
                         onTap = { onShowBookmarksChange(true) },
-                        onLongPress = { onAddBookmark(currentPage) }
+                        // ✅ non salva più: spostato sul long-press sulla pagina
+                        onLongPress = { }
                     )
 
                     ToolbarButton("100") { onLoadPage("100") }
@@ -264,9 +321,20 @@ fun TelevideoScreen(
                     onTapArea = { onLoadPage(it.page) },
                     onSwipePage = { delta -> handleSwipePage(delta) },
                     onSwipeSub = { delta -> handleSwipeSub(delta) },
+                    // ✅ long-press sulla pagina salva bookmark + overlay in alto
+                    onLongPressPage = {
+                        onAddBookmark(currentPage)     // salva SOLO pagina (come vuoi tu)
+                        showSavedToast(currentPage)
+                    },
                     debug = false
                 )
             }
+
+            // ✅ overlay in alto
+            BookmarkSavedTopOverlay(
+                visible = showSaved,
+                text = savedText
+            )
         }
     }
 }

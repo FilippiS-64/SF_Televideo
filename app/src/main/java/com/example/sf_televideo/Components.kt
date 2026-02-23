@@ -5,7 +5,6 @@ import android.graphics.Paint
 import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -90,7 +89,7 @@ fun BookmarksDialog(
         title = { Text("Bookmarks") },
         text = {
             if (bookmarks.isEmpty()) {
-                Text("No bookmarks.\nLong-press ★ to add the current page.")
+                Text("No bookmarks.\nLong-press on the page to add the current page.")
             } else {
                 LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
                     items(bookmarks) { p ->
@@ -144,6 +143,7 @@ fun TelevideoImage(
     onTapArea: (ClickArea) -> Unit,
     onSwipePage: (delta: Int) -> Unit,
     onSwipeSub: (delta: Int) -> Unit,
+    onLongPressPage: (() -> Unit)? = null,   // ✅ NEW
     debug: Boolean = false
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
@@ -228,49 +228,55 @@ fun TelevideoImage(
                 }
             )
         }
-        // 2) TAP aree cliccabili
-        .pointerInput(bitmap, correctedAreas, stretchY) {
-            detectTapGestures { tap: Offset ->
-                val vw = size.width
-                val vh = size.height
-                if (vw <= 0f || vh <= 0f) return@detectTapGestures
+        // 2) TAP aree cliccabili + LONG PRESS pagina
+        .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage) {
+            detectTapGestures(
+                onTap = { tap: Offset ->
+                    val vw = size.width
+                    val vh = size.height
+                    if (vw <= 0f || vh <= 0f) return@detectTapGestures
 
-                val px = ((tap.x / vw) * bitmap.width)
-                    .roundToInt()
-                    .coerceIn(0, bitmap.width - 1)
+                    val px = ((tap.x / vw) * bitmap.width)
+                        .roundToInt()
+                        .coerceIn(0, bitmap.width - 1)
 
-                val py = ((tap.y / vh) * bitmap.height)
-                    .roundToInt()
-                    .coerceIn(0, bitmap.height - 1)
+                    val py = ((tap.y / vh) * bitmap.height)
+                        .roundToInt()
+                        .coerceIn(0, bitmap.height - 1)
 
-                val hits = correctedAreas.filter { it.contains(px, py) }
+                    val hits = correctedAreas.filter { it.contains(px, py) }
 
-                val hit = hits.minByOrNull { a ->
-                    ((a.x2 - a.x1).coerceAtLeast(1) * (a.y2 - a.y1).coerceAtLeast(1))
+                    val hit = hits.minByOrNull { a ->
+                        ((a.x2 - a.x1).coerceAtLeast(1) * (a.y2 - a.y1).coerceAtLeast(1))
+                    }
+
+                    val rawPage = hit?.page
+                    val cleanPage = sanitizePage(rawPage)
+
+                    if (debug) {
+                        lastTapView = tap
+                        lastTapBmp = px to py
+                        lastHits = hits
+                        lastChosenRect = hit
+                        lastChosenRaw = rawPage
+                        lastChosenClean = cleanPage
+
+                        Log.d(
+                            "TVDBG",
+                            "tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { it.page }} chosenRaw=$rawPage chosenClean=$cleanPage"
+                        )
+                    }
+
+                    if (hit != null && cleanPage != null) {
+                        val safeHit = hit.copy(page = cleanPage)
+                        onTapArea(safeHit)
+                    }
+                },
+                onLongPress = {
+                    // ✅ Long-press OVUNQUE sulla pagina -> bookmark (gestito dal caller)
+                    onLongPressPage?.invoke()
                 }
-
-                val rawPage = hit?.page
-                val cleanPage = sanitizePage(rawPage)
-
-                if (debug) {
-                    lastTapView = tap
-                    lastTapBmp = px to py
-                    lastHits = hits
-                    lastChosenRect = hit
-                    lastChosenRaw = rawPage
-                    lastChosenClean = cleanPage
-
-                    Log.d(
-                        "TVDBG",
-                        "tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { it.page }} chosenRaw=$rawPage chosenClean=$cleanPage"
-                    )
-                }
-
-                if (hit != null && cleanPage != null) {
-                    val safeHit = hit.copy(page = cleanPage)
-                    onTapArea(safeHit)
-                }
-            }
+            )
         }
 
     Box(modifier = imgModifier) {
