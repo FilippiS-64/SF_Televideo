@@ -209,8 +209,17 @@ fun TelevideoScreen(
     fun formatPage(p: Int): String = String.format("%03d", p)
 
     fun clickAreaToInput(area: ClickArea): String {
-        // ✅ IMPORTANTISSIMO: se c'è subpage, passala a TelevideoApp.load()
-        val sub = area.subpage?.trim()?.takeIf { it.isNotBlank() && it != "01" }
+        val subRaw = area.subpage?.trim().orEmpty()
+
+        // La mappa spesso usa 00 per indicare "pagina base"
+        val sub = subRaw
+            .takeIf { it.isNotBlank() }
+            ?.let {
+                val n = it.toIntOrNull()
+                // 00 o 01 -> pagina base (non passare sottopagina)
+                if (n == null || n <= 1) null else n.toString().padStart(2, '0')
+            }
+
         return if (sub == null) area.page else "${area.page}-$sub"
     }
 

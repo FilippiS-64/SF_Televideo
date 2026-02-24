@@ -120,16 +120,6 @@ fun BookmarksDialog(
     )
 }
 
-/**
- * Prende qualunque stringa (OCR/map) e tira fuori SOLO una pagina valida 100..899.
- * Se non la trova -> null.
- */
-private fun sanitizePage(raw: String?): String? {
-    if (raw.isNullOrBlank()) return null
-    val m = Regex("""([1-8]\d{2})""").find(raw)
-    return m?.groupValues?.getOrNull(1)
-}
-
 @Composable
 fun TelevideoImage(
     bitmap: Bitmap,
@@ -145,7 +135,7 @@ fun TelevideoImage(
 ) {
     if (bitmap.width <= 0 || bitmap.height <= 0) return
 
-    val correctedAreas = remember(bitmap.width, clickAreas) {
+    val correctedAreas = remember(bitmap.width, bitmap.height, clickAreas) {
         if (clickAreas.isEmpty()) return@remember emptyList<ClickArea>()
 
         val maxX = clickAreas.maxOf { it.x2 }.coerceAtLeast(1)
@@ -179,8 +169,6 @@ fun TelevideoImage(
     var lastTapView by remember { mutableStateOf<Offset?>(null) }
     var lastTapBmp by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var lastHits by remember { mutableStateOf<List<ClickArea>>(emptyList()) }
-    var lastChosenRaw by remember { mutableStateOf<String?>(null) }
-    var lastChosenClean by remember { mutableStateOf<String?>(null) }
     var lastChosenRect by remember { mutableStateOf<ClickArea?>(null) }
 
     val swipeThresholdPx = 90f
@@ -189,7 +177,7 @@ fun TelevideoImage(
         .fillMaxWidth()
         .aspectRatio(bitmap.width.toFloat() / (bitmap.height.toFloat() * stretchY))
 
-        // 0) TAP A DUE DITA (UNDO) — NIENTE awaitPointerEventScope: usiamo awaitEachGesture direttamente
+        // 0) TAP A DUE DITA (UNDO)
         .pointerInput(onTwoFingerTapPage) {
             if (onTwoFingerTapPage == null) return@pointerInput
 
@@ -199,7 +187,7 @@ fun TelevideoImage(
                 val start1 = down1.position
 
                 val t0 = SystemClock.uptimeMillis()
-                val maxDurationMs = 320L   // un filo più permissivo del 260
+                val maxDurationMs = 320L
 
                 val slop = viewConfiguration.touchSlop
                 var maxMove = 0f
@@ -212,12 +200,10 @@ fun TelevideoImage(
                 var up2 = false
 
                 while (true) {
-                    // ✅ questa è disponibile qui (AwaitPointerEventScope)
                     val event = awaitPointerEvent()
 
                     if (SystemClock.uptimeMillis() - t0 > maxDurationMs) break
 
-                    // aggancia secondo dito se arriva
                     if (id2 == null) {
                         val second = event.changes.firstOrNull { it.id != id1 && it.pressed }
                         if (second != null) {
@@ -227,7 +213,6 @@ fun TelevideoImage(
                         }
                     }
 
-                    // dito 1
                     val c1 = event.changes.firstOrNull { it.id == id1 }
                     if (c1 != null) {
                         maxMove = maxOf(maxMove, (c1.position - start1).getDistance())
@@ -236,7 +221,6 @@ fun TelevideoImage(
                         up1 = true
                     }
 
-                    // dito 2
                     if (id2 != null && start2 != null) {
                         val c2 = event.changes.firstOrNull { it.id == id2 }
                         if (c2 != null) {
@@ -247,10 +231,8 @@ fun TelevideoImage(
                         }
                     }
 
-                    // troppo movimento -> non è tap
                     if (maxMove > slop) break
 
-                    // successo
                     if (hadTwoFingers && up1 && up2) {
                         event.changes.forEach { it.consumeAllChanges() }
                         if (debug) Log.d("TVDBG", "TwoFingerTap -> UNDO")
@@ -261,7 +243,49 @@ fun TelevideoImage(
             }
         }
 
-        // 1) DRAG (swipe)
+        // ✅ 1) TAP/LONG/DOUBLE PRIMA (così non vengono “mangiati” dallo swipe)
+        .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage, onDoubleTapPage) {
+            detectTapGestures(
+                onTap = { tap: Offset ->
+                    val vw = size.width
+                    val vh = size.height
+                    if (vw <= 0f || vh <= 0f) return@detectTapGestures
+
+                    val px = ((tap.x / vw) * bitmap.width)
+                        .roundToInt()
+                        .coerceIn(0, bitmap.width - 1)
+
+                    val py = ((tap.y / vh) * bitmap.height)
+                        .roundToInt()
+                        .coerceIn(0, bitmap.height - 1)
+
+                    val hits = correctedAreas.filter { it.contains(px, py) }
+
+                    val hit = hits.minByOrNull { a ->
+                        ((a.x2 - a.x1).coerceAtLeast(1) * (a.y2 - a.y1).coerceAtLeast(1))
+                    }
+
+                    if (debug) {
+                        lastTapView = tap
+                        lastTapBmp = px to py
+                        lastHits = hits
+                        lastChosenRect = hit
+
+                        Log.d(
+                            "TVDBG",
+                            "tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { "${it.page}-${it.subpage ?: ""}" }}"
+                        )
+                    }
+
+                    // ✅ IMPORTANTISSIMO: NON “ripuliamo” nulla qui. Passiamo l’area così com’è.
+                    if (hit != null) onTapArea(hit)
+                },
+                onLongPress = { onLongPressPage?.invoke() },
+                onDoubleTap = { onDoubleTapPage?.invoke() }
+            )
+        }
+
+        // 2) DRAG (swipe) DOPO i tap
         .pointerInput(bitmap, stretchY) {
             var totalX = 0f
             var totalY = 0f
@@ -292,55 +316,6 @@ fun TelevideoImage(
                         onSwipeSub(delta)
                     }
                 }
-            )
-        }
-
-        // 2) TAP aree cliccabili + LONG PRESS pagina + DOUBLE TAP pagina
-        .pointerInput(bitmap, correctedAreas, stretchY, onLongPressPage, onDoubleTapPage) {
-            detectTapGestures(
-                onTap = { tap: Offset ->
-                    val vw = size.width
-                    val vh = size.height
-                    if (vw <= 0f || vh <= 0f) return@detectTapGestures
-
-                    val px = ((tap.x / vw) * bitmap.width)
-                        .roundToInt()
-                        .coerceIn(0, bitmap.width - 1)
-
-                    val py = ((tap.y / vh) * bitmap.height)
-                        .roundToInt()
-                        .coerceIn(0, bitmap.height - 1)
-
-                    val hits = correctedAreas.filter { it.contains(px, py) }
-
-                    val hit = hits.minByOrNull { a ->
-                        ((a.x2 - a.x1).coerceAtLeast(1) * (a.y2 - a.y1).coerceAtLeast(1))
-                    }
-
-                    val rawPage = hit?.page
-                    val cleanPage = sanitizePage(rawPage)
-
-                    if (debug) {
-                        lastTapView = tap
-                        lastTapBmp = px to py
-                        lastHits = hits
-                        lastChosenRect = hit
-                        lastChosenRaw = rawPage
-                        lastChosenClean = cleanPage
-
-                        Log.d(
-                            "TVDBG",
-                            "tapBmp=($px,$py) hits=${hits.size} pages=${hits.joinToString { it.page }} chosenRaw=$rawPage chosenClean=$cleanPage"
-                        )
-                    }
-
-                    if (hit != null && cleanPage != null) {
-                        val safeHit = hit.copy(page = cleanPage)
-                        onTapArea(safeHit)
-                    }
-                },
-                onLongPress = { onLongPressPage?.invoke() },
-                onDoubleTap = { onDoubleTapPage?.invoke() }
             )
         }
 

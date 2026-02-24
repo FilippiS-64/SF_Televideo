@@ -169,13 +169,13 @@ fun TelevideoApp() {
                 Log.d(TAG_NAV, "R#$reqId fetching bitmapKey=$newKey areasPage=$page")
 
                 coroutineScope {
+                    // 1) bitmap
                     val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(newKey) }
-                    val areasDeferred = async(Dispatchers.IO) { repo.fetchClickAreas(page) }
-
                     val bmp = bmpDeferred.await()
 
+                    // 2) clickAreas: usa overload con bitmap (così compila e può fare OCR fallback)
                     val areas = try {
-                        areasDeferred.await()
+                        repo.fetchClickAreas(page, bmp)
                     } catch (_: Exception) {
                         emptyList()
                     }
