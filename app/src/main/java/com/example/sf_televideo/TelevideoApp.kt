@@ -14,6 +14,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -25,6 +26,8 @@ import kotlinx.coroutines.launch
 // ---------- DataStore ----------
 private val Context.dataStore by preferencesDataStore(name = "sf_televideo_prefs")
 private val BOOKMARKS_KEY = stringSetPreferencesKey("bookmarks_pages")
+
+private const val TAG_NAV = "TV_NAV"
 
 @Composable
 fun TelevideoApp() {
@@ -51,6 +54,11 @@ fun TelevideoApp() {
     // ✅ History per UNDO (salviamo la "chiave" usata per caricare bitmap: "261" oppure "261-02")
     val history = remember { mutableStateListOf<String>() }
     var isUndoing by remember { mutableStateOf(false) }
+
+    // --- NEW: counters per logging/correlazione ---
+    var gestureCounter by remember { mutableIntStateOf(0) }
+    var requestCounter by remember { mutableIntStateOf(0) }
+    var activeRequestId by remember { mutableIntStateOf(0) }
 
     // ---- Load bookmarks once at startup ----
     LaunchedEffect(Unit) {
@@ -116,15 +124,24 @@ fun TelevideoApp() {
      * Carica pagina+sub.
      * pushToHistory = true => salva lo stato precedente per UNDO
      */
-    fun load(input: String, pushToHistory: Boolean = true) {
+    fun load(input: String, pushToHistory: Boolean = true, reason: String = "LOAD") {
         val parsed = parsePageAndSub(input) ?: return
         val (page, sub) = parsed
 
-        // ✅ cancella eventuale load precedente (swipe rapidi)
-        loadJob?.cancel()
+        // --- NEW: request id + latest-wins ---
+        val reqId = ++requestCounter
+        activeRequestId = reqId
 
         val newKey = keyFor(page, sub)
         val prevKey = keyFor(currentPage, currentSubpage)
+
+        Log.d(
+            TAG_NAV,
+            "R#$reqId start reason=$reason input='$input' prev=$prevKey -> target=$newKey (cancelPrev=${loadJob != null})"
+        )
+
+        // ✅ cancella eventuale load precedente (swipe rapidi)
+        loadJob?.cancel()
 
         // ✅ push history SOLO se:
         // - non siamo in undo
@@ -137,37 +154,59 @@ fun TelevideoApp() {
         }
 
         loadJob = scope.launch {
-            isLoading = true
-            errorText = null
-
-            // aggiorna SUBITO lo stato richiesto
-            currentPage = page
-            currentSubpage = sub
-
-            // reset aree
-            clickAreas = emptyList()
+            // Imposta loading SOLO se questa è ancora la request attiva
+            if (reqId == activeRequestId) {
+                isLoading = true
+                errorText = null
+                // aggiorna SUBITO lo stato richiesto
+                currentPage = page
+                currentSubpage = sub
+                // reset aree
+                clickAreas = emptyList()
+            }
 
             try {
-                Log.d("TVDBG", "LOAD request input=$input  -> page=$page sub=$sub  key=$newKey")
+                Log.d(TAG_NAV, "R#$reqId fetching bitmapKey=$newKey areasPage=$page")
 
                 coroutineScope {
                     val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(newKey) }
                     val areasDeferred = async(Dispatchers.IO) { repo.fetchClickAreas(page) }
 
-                    bitmap = bmpDeferred.await()
+                    val bmp = bmpDeferred.await()
 
-                    clickAreas = try {
+                    val areas = try {
                         areasDeferred.await()
                     } catch (_: Exception) {
                         emptyList()
                     }
+
+                    // --- NEW: applica risultati solo se ancora attiva ---
+                    if (reqId == activeRequestId) {
+                        bitmap = bmp
+                        clickAreas = areas
+                        Log.d(TAG_NAV, "R#$reqId done APPLY=true target=$newKey areas=${areas.size}")
+                    } else {
+                        Log.d(TAG_NAV, "R#$reqId done APPLY=false (stale) active=R#$activeRequestId target=$newKey")
+                    }
                 }
+            } catch (ce: CancellationException) {
+                // cancellata perché è arrivata una richiesta più nuova
+                Log.d(TAG_NAV, "R#$reqId cancelled active=R#$activeRequestId target=$newKey")
+                throw ce
             } catch (e: Exception) {
-                errorText = e.message ?: "Unknown error"
-                Log.e("TVDBG", "LOAD error: ${e.message}", e)
+                if (reqId == activeRequestId) {
+                    errorText = e.message ?: "Unknown error"
+                }
+                Log.e(TAG_NAV, "R#$reqId error target=$newKey msg=${e.message}", e)
             } finally {
-                isLoading = false
-                isUndoing = false
+                // --- NEW: evita che una vecchia request spenga il loading della nuova ---
+                if (reqId == activeRequestId) {
+                    isLoading = false
+                    isUndoing = false
+                    Log.d(TAG_NAV, "R#$reqId finally APPLY=true isLoading=false")
+                } else {
+                    Log.d(TAG_NAV, "R#$reqId finally APPLY=false (stale) active=R#$activeRequestId")
+                }
             }
         }
     }
@@ -181,7 +220,7 @@ fun TelevideoApp() {
         Log.d("TVDBG", "UNDO -> $prev (remaining=${history.size})")
 
         isUndoing = true
-        load(prev, pushToHistory = false)
+        load(prev, pushToHistory = false, reason = "UNDO")
     }
 
     // ----------------------------
@@ -208,7 +247,7 @@ fun TelevideoApp() {
     // ✅ Primo load: piccola delay per evitare glitch iniziale emulatore (la tua pagina 100 “sparisce”)
     LaunchedEffect(Unit) {
         delay(80)
-        load("101", pushToHistory = false)
+        load("101", pushToHistory = false, reason = "STARTUP")
     }
 
     // ✅ Box per poter mettere l'overlay sopra la UI
@@ -225,10 +264,12 @@ fun TelevideoApp() {
             onShowBookmarksChange = { value ->
                 if (showBookmarks != value) showBookmarks = value
             },
-            onLoadPage = { load(it, pushToHistory = true) },
+            onLoadPage = { load(it, pushToHistory = true, reason = "KEYPAD/TAP") },
 
             // ✅ SWIPE PAGINA: CICLICO 100..899 (e va in history)
             onSwipePage = { delta ->
+                val gId = ++gestureCounter
+
                 val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
                 val cur = pageInt.coerceIn(100, 899)
 
@@ -237,15 +278,24 @@ fun TelevideoApp() {
                     delta < 0 -> prevPageCyclic(cur)
                     else -> cur
                 }
-                load(fmtPage(next), pushToHistory = true)
+
+                val target = fmtPage(next)
+                Log.d(TAG_NAV, "G#$gId swipePage delta=$delta from=${fmtPage(cur)}.${currentSubpage} -> target=$target.01")
+
+                load(target, pushToHistory = true, reason = "SWIPE_PAGE G#$gId")
             },
 
             // ✅ SWIPE SUB: CICLICO 01..maxSubpages (e va in history)
             onSwipeSub = { delta ->
+                val gId = ++gestureCounter
+
                 val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
                 val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
 
-                if (maxSub == 1) return@TelevideoScreen
+                if (maxSub == 1) {
+                    Log.d(TAG_NAV, "G#$gId swipeSub ignored (maxSub=1) page=${fmtPage(pageInt)}")
+                    return@TelevideoScreen
+                }
 
                 val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
                 val curSub = subInt.coerceIn(1, maxSub)
@@ -255,7 +305,14 @@ fun TelevideoApp() {
                     delta < 0 -> prevSubCyclic(curSub, maxSub)
                     else -> curSub
                 }
-                load("${fmtPage(pageInt)}-${fmtSub(nextSub)}", pushToHistory = true)
+
+                val targetKey = "${fmtPage(pageInt)}-${fmtSub(nextSub)}"
+                Log.d(
+                    TAG_NAV,
+                    "G#$gId swipeSub delta=$delta page=${fmtPage(pageInt)} fromSub=${fmtSub(curSub)}/$maxSub -> target=$targetKey"
+                )
+
+                load(targetKey, pushToHistory = true, reason = "SWIPE_SUB G#$gId")
             },
 
             onAddBookmark = { pageStr ->

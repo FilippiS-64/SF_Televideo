@@ -7,20 +7,29 @@ import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jsoup.Jsoup
 import java.io.IOException
 import java.util.regex.Pattern
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.currentCoroutineContext
 
 class TelevideoRepository(
     private val client: OkHttpClient = OkHttpClient()
 ) {
     companion object {
         private const val TAG = "TelevideoRepo"
+        private const val TAG_BMP = "BMP"
     }
 
     // key può essere "102" oppure "102-02"
@@ -55,9 +64,65 @@ class TelevideoRepository(
         }
         // fallback: prendi solo cifre
         val digits = key.filter { it.isDigit() }
+        if (digits.length < 3) return "100" to null // fallback ultra difensivo
         val p = digits.take(3)
         val s = if (digits.length >= 5) digits.substring(3, 5).toIntOrNull() else null
         return p to s
+    }
+
+    // -----------------------------
+    // ✅ OkHttp cancellabile
+    // -----------------------------
+    private suspend fun Call.awaitResponse(): Response =
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation {
+                try { cancel() } catch (_: Exception) {}
+            }
+            enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isCancelled) return
+                    cont.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    cont.resume(response)
+                }
+            })
+        }
+
+    private suspend fun callAwaitBytes(url: String): ByteArray {
+        val req = Request.Builder().url(url).build()
+        val call = client.newCall(req)
+
+        val resp = try {
+            call.awaitResponse()
+        } catch (ce: CancellationException) {
+            Log.d(TAG_BMP, "call cancelled url=$url")
+            throw ce
+        }
+
+        resp.use { r ->
+            if (!r.isSuccessful) throw IOException("HTTP ${r.code} url=$url")
+            val bytes = r.body?.bytes() ?: throw IOException("Empty body url=$url")
+            return bytes
+        }
+    }
+
+    private suspend fun callAwaitString(url: String): String {
+        val req = Request.Builder().url(url).build()
+        val call = client.newCall(req)
+
+        val resp = try {
+            call.awaitResponse()
+        } catch (ce: CancellationException) {
+            Log.d(TAG, "call cancelled url=$url")
+            throw ce
+        }
+
+        resp.use { r ->
+            if (!r.isSuccessful) throw IOException("HTTP ${r.code} url=$url")
+            return r.body?.string().orEmpty()
+        }
     }
 
     /**
@@ -67,12 +132,16 @@ class TelevideoRepository(
      */
     suspend fun fetchBitmap(key: String): Bitmap =
         withContext(Dispatchers.IO) {
+            currentCoroutineContext().ensureActive()
+
             val primaryUrl = imageUrl(key)
-            Log.d("BMP", "fetchBitmap(pageKey=$key) try direct=$primaryUrl")
+            Log.d(TAG_BMP, "fetchBitmap(key=$key) try direct=$primaryUrl")
 
             try {
                 fetchBitmapFromUrl(primaryUrl)
             } catch (e: IOException) {
+                currentCoroutineContext().ensureActive()
+
                 val msg = e.message.orEmpty()
                 val is404 = msg.contains("HTTP 404", ignoreCase = true)
 
@@ -85,17 +154,19 @@ class TelevideoRepository(
                 val (page, sub) = parseKey(key)
                 val paginaUrl = paginaJspUrl(page, sub)
 
-                Log.w(TAG, "Direct PNG failed for $key url=$primaryUrl err=$msg")
+                Log.w(TAG, "Direct PNG failed for key=$key url=$primaryUrl err=$msg")
                 Log.w(TAG, "Trying fallback via pagina.jsp: $paginaUrl")
 
                 val fallbackImageUrl = try {
                     resolveImageUrlFromPaginaJsp(paginaUrl)
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (ex: Exception) {
                     Log.e(TAG, "Fallback resolveImageUrlFromPaginaJsp FAIL key=$key paginaUrl=$paginaUrl", ex)
                     null
                 }
 
-                Log.d("BMP", "fallbackImageUrl for key=$key -> $fallbackImageUrl")
+                Log.d(TAG_BMP, "fallbackImageUrl key=$key -> $fallbackImageUrl")
 
                 if (fallbackImageUrl.isNullOrBlank()) {
                     throw IOException("Pagina $key non disponibile (immagine non trovata)")
@@ -103,6 +174,8 @@ class TelevideoRepository(
 
                 try {
                     fetchBitmapFromUrl(fallbackImageUrl)
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (ex: Exception) {
                     Log.e(TAG, "fetchBitmap fallback FAIL key=$key url=$fallbackImageUrl", ex)
                     throw IOException("Pagina $key non disponibile (errore download immagine)")
@@ -110,50 +183,49 @@ class TelevideoRepository(
             }
         }
 
-    private fun fetchBitmapFromUrl(url: String): Bitmap {
-        Log.d("BMP", "fetchBitmapFromUrl url=$url")
+    private suspend fun fetchBitmapFromUrl(url: String): Bitmap {
+        currentCoroutineContext().ensureActive()
 
-        val req = Request.Builder().url(url).build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code} url=$url")
-            val bytes = resp.body?.bytes() ?: throw IOException("Empty image body url=$url")
-            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                ?: throw IOException("Decode bitmap failed url=$url")
-        }
+        Log.d(TAG_BMP, "fetchBitmapFromUrl url=$url")
+        val bytes = callAwaitBytes(url)
+
+        currentCoroutineContext().ensureActive()
+
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw IOException("Decode bitmap failed url=$url")
     }
 
     /**
      * Legge pagina.jsp (già costruita con p/s) e prova a ricavare l'URL dell'immagine reale.
      */
-    private fun resolveImageUrlFromPaginaJsp(paginaUrl: String): String? {
-        val req = Request.Builder().url(paginaUrl).build()
+    private suspend fun resolveImageUrlFromPaginaJsp(paginaUrl: String): String? {
+        currentCoroutineContext().ensureActive()
 
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            val html = resp.body?.string().orEmpty()
-            if (html.isBlank()) return null
+        val html = callAwaitString(paginaUrl)
+        if (html.isBlank()) return null
 
-            val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
+        currentCoroutineContext().ensureActive()
 
-            // 1) prima immagine png in pagina
-            val img1 = doc.selectFirst("img[src$=.png]")
-            val abs1 = img1?.absUrl("src")?.takeIf { it.isNotBlank() }
-            if (!abs1.isNullOrBlank()) return abs1
+        val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
 
-            // 2) qualunque img con ".png"
-            val imgs = doc.select("img[src]")
-            for (img in imgs) {
-                val src = img.attr("src")
-                if (src.contains(".png", ignoreCase = true)) {
-                    val abs = img.absUrl("src")
-                    if (abs.isNotBlank()) return abs
-                }
+        // 1) prima immagine png in pagina
+        val img1 = doc.selectFirst("img[src$=.png]")
+        val abs1 = img1?.absUrl("src")?.takeIf { it.isNotBlank() }
+        if (!abs1.isNullOrBlank()) return abs1
+
+        // 2) qualunque img con ".png"
+        val imgs = doc.select("img[src]")
+        for (img in imgs) {
+            val src = img.attr("src")
+            if (src.contains(".png", ignoreCase = true)) {
+                val abs = img.absUrl("src")
+                if (abs.isNotBlank()) return abs
             }
-
-            // 3) regex dentro html
-            val rx = Regex("""https?://[^\s"'<>]+\.png""", RegexOption.IGNORE_CASE)
-            return rx.find(html)?.value
         }
+
+        // 3) regex dentro html
+        val rx = Regex("""https?://[^\s"'<>]+\.png""", RegexOption.IGNORE_CASE)
+        return rx.find(html)?.value
     }
 
     /**
@@ -163,62 +235,67 @@ class TelevideoRepository(
         withContext(Dispatchers.IO) {
             val url = mapUrl(page)
             try {
-                val req = Request.Builder().url(url).build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@withContext emptyList()
+                currentCoroutineContext().ensureActive()
 
-                    val html = resp.body?.string().orEmpty()
-                    val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
+                val html = callAwaitString(url)
+                if (html.isBlank()) return@withContext emptyList()
 
-                    val areas = doc.select("area[coords][href]")
-                    if (areas.isEmpty()) return@withContext emptyList()
+                currentCoroutineContext().ensureActive()
 
-                    val out = mutableListOf<ClickArea>()
+                val doc = Jsoup.parse(html, "https://www.servizitelevideo.rai.it/")
 
-                    val rxPageParam =
-                        Pattern.compile("""(?:\bpagina\b|\bp\b)\s*=\s*([1-8]\d{2})""")
-                    val rxAnyPage =
-                        Pattern.compile("""\b([1-8]\d{2})\b""")
-                    val rxSub =
-                        Pattern.compile("""(?:\bsottopagina\b|\bs\b)\s*=\s*(\d{1,2})""")
+                val areas = doc.select("area[coords][href]")
+                if (areas.isEmpty()) return@withContext emptyList()
 
-                    for (a in areas) {
-                        val coordsRaw = a.attr("coords").trim()
-                        val href = a.absUrl("href").ifBlank { a.attr("href") }
+                val out = mutableListOf<ClickArea>()
 
-                        val coords = coordsRaw.split(",").mapNotNull { it.trim().toIntOrNull() }
-                        if (coords.size < 4) continue
+                val rxPageParam =
+                    Pattern.compile("""(?:\bpagina\b|\bp\b)\s*=\s*([1-8]\d{2})""")
+                val rxAnyPage =
+                    Pattern.compile("""\b([1-8]\d{2})\b""")
+                val rxSub =
+                    Pattern.compile("""(?:\bsottopagina\b|\bs\b)\s*=\s*(\d{1,2})""")
 
-                        val x1 = minOf(coords[0], coords[2])
-                        val y1 = minOf(coords[1], coords[3])
-                        val x2 = maxOf(coords[0], coords[2])
-                        val y2 = maxOf(coords[1], coords[3])
+                for (a in areas) {
+                    val coordsRaw = a.attr("coords").trim()
+                    val href = a.absUrl("href").ifBlank { a.attr("href") }
 
-                        var pageNum: String? = null
-                        val mP = rxPageParam.matcher(href)
-                        while (mP.find()) pageNum = mP.group(1)
+                    val coords = coordsRaw.split(",").mapNotNull { it.trim().toIntOrNull() }
+                    if (coords.size < 4) continue
 
-                        if (pageNum == null) {
-                            val mAny = rxAnyPage.matcher(href)
-                            while (mAny.find()) pageNum = mAny.group(1)
-                        }
+                    val x1 = minOf(coords[0], coords[2])
+                    val y1 = minOf(coords[1], coords[3])
+                    val x2 = maxOf(coords[0], coords[2])
+                    val y2 = maxOf(coords[1], coords[3])
 
-                        var sub: String? = null
-                        val mS = rxSub.matcher(href)
-                        while (mS.find()) sub = mS.group(1)
+                    var pageNum: String? = null
+                    val mP = rxPageParam.matcher(href)
+                    while (mP.find()) pageNum = mP.group(1)
 
-                        val finalPage = pageNum ?: continue
-
-                        out.add(
-                            ClickArea(
-                                x1 = x1, y1 = y1, x2 = x2, y2 = y2,
-                                page = finalPage,
-                                subpage = sub?.padStart(2, '0')
-                            )
-                        )
+                    if (pageNum == null) {
+                        val mAny = rxAnyPage.matcher(href)
+                        while (mAny.find()) pageNum = mAny.group(1)
                     }
-                    out
+
+                    var sub: String? = null
+                    val mS = rxSub.matcher(href)
+                    while (mS.find()) sub = mS.group(1)
+
+                    val finalPage = pageNum ?: continue
+
+                    out.add(
+                        ClickArea(
+                            x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+                            page = finalPage,
+                            subpage = sub?.padStart(2, '0')
+                        )
+                    )
                 }
+                out
+            } catch (ce: CancellationException) {
+                // normale su swipe rapidi
+                Log.d(TAG, "fetchClickAreas CANCELLED page=$page")
+                throw ce
             } catch (e: Exception) {
                 Log.e(TAG, "fetchClickAreas(MAP) FAIL page=$page url=$url", e)
                 emptyList()

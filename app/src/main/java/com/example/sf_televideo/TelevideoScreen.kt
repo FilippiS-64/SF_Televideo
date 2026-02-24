@@ -3,6 +3,7 @@
 package com.example.sf_televideo
 
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -18,6 +19,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+private const val TAG_NAV = "TV_NAV"
 
 @Composable
 private fun PageKeypadDialog(
@@ -178,13 +181,16 @@ fun TelevideoScreen(
     onRemoveBookmark: (Int) -> Unit,
     onSwipePage: (Int) -> Unit,
     onSwipeSub: (Int) -> Unit,
-    onUndo: () -> Unit                 // ✅ resta, ma NON c’è più il bottone
+    onUndo: () -> Unit
 ) {
     var showKeypad by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     var showSaved by remember { mutableStateOf(false) }
     var savedText by remember { mutableStateOf("") }
+
+    // ✅ Evita gesture mentre sto caricando o con dialog aperti
+    val canNavigate = !isLoading && !showBookmarks && !showKeypad
 
     fun pageForToast(p: String): String {
         val n = p.toIntOrNull()
@@ -201,6 +207,12 @@ fun TelevideoScreen(
     }
 
     fun formatPage(p: Int): String = String.format("%03d", p)
+
+    fun clickAreaToInput(area: ClickArea): String {
+        // ✅ IMPORTANTISSIMO: se c'è subpage, passala a TelevideoApp.load()
+        val sub = area.subpage?.trim()?.takeIf { it.isNotBlank() && it != "01" }
+        return if (sub == null) area.page else "${area.page}-$sub"
+    }
 
     Column(
         modifier = Modifier
@@ -228,7 +240,7 @@ fun TelevideoScreen(
                     ToolbarButton("260") { onLoadPage("260") }
                 }
             },
-            actions = { /* niente undo button */ },
+            actions = { },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = Color(0xFF101010),
                 titleContentColor = Color.White,
@@ -241,6 +253,7 @@ fun TelevideoScreen(
                 onDismiss = { showKeypad = false },
                 onConfirm = { page3 ->
                     showKeypad = false
+                    Log.d(TAG_NAV, "UI keypad confirm -> $page3")
                     onLoadPage(page3)
                 }
             )
@@ -252,7 +265,9 @@ fun TelevideoScreen(
                 onDismiss = { onShowBookmarksChange(false) },
                 onSelect = { p ->
                     onShowBookmarksChange(false)
-                    onLoadPage(formatPage(p))
+                    val s = formatPage(p)
+                    Log.d(TAG_NAV, "UI bookmark select -> $s")
+                    onLoadPage(s)
                 },
                 onRemove = { onRemoveBookmark(it) }
             )
@@ -279,21 +294,36 @@ fun TelevideoScreen(
                     bitmap = bitmap,
                     clickAreas = clickAreas,
                     stretchY = 2.5f,
-                    onTapArea = { onLoadPage(it.page) },
-                    onSwipePage = { delta -> onSwipePage(delta) },
-                    onSwipeSub = { delta -> onSwipeSub(delta) },
+
+                    onTapArea = { area ->
+                        val input = clickAreaToInput(area)
+                        Log.d(TAG_NAV, "UI tapArea page=${area.page} sub=${area.subpage} -> input='$input' canNav=$canNavigate")
+                        if (canNavigate) onLoadPage(input)
+                    },
+
+                    onSwipePage = { delta ->
+                        Log.d(TAG_NAV, "UI swipePage delta=$delta canNav=$canNavigate")
+                        if (canNavigate) onSwipePage(delta)
+                    },
+
+                    onSwipeSub = { delta ->
+                        Log.d(TAG_NAV, "UI swipeSub delta=$delta canNav=$canNavigate")
+                        if (canNavigate) onSwipeSub(delta)
+                    },
 
                     onLongPressPage = {
+                        Log.d(TAG_NAV, "UI longPress -> addBookmark page=$currentPage")
                         onAddBookmark(currentPage)
                         showSavedToast(currentPage)
                     },
 
                     onDoubleTapPage = {
+                        Log.d(TAG_NAV, "UI doubleTap -> openKeypad")
                         showKeypad = true
                     },
 
-                    // ✅ ECCO L’UNDO: tap a due dita
                     onTwoFingerTapPage = {
+                        Log.d(TAG_NAV, "UI twoFingerTap -> UNDO")
                         onUndo()
                     },
 
