@@ -55,10 +55,17 @@ fun TelevideoApp() {
     val history = remember { mutableStateListOf<String>() }
     var isUndoing by remember { mutableStateOf(false) }
 
-    // --- NEW: counters per logging/correlazione ---
+    // --- counters per logging/correlazione ---
     var gestureCounter by remember { mutableIntStateOf(0) }
     var requestCounter by remember { mutableIntStateOf(0) }
     var activeRequestId by remember { mutableIntStateOf(0) }
+
+    // --- cache max sottopagine per pagina (dinamica) ---
+    // Convenzione:
+    // 0  = sconosciuto (non abbiamo ancora capito quante sub ci sono)
+    // 1  = confermato: una sola sottopagina
+    // >=2 = confermato max sottopagine (almeno fino a quel numero)
+    val maxSubCache = remember { mutableStateMapOf<Int, Int>() }
 
     // ---- Load bookmarks once at startup ----
     LaunchedEffect(Unit) {
@@ -120,6 +127,25 @@ fun TelevideoApp() {
     fun keyFor(page: String, sub: String): String =
         if (sub == "01") page else "$page-$sub"
 
+    // ----------------------------
+    // ✅ Helpers per swipe ciclici
+    // ----------------------------
+    fun fmtPage(p: Int): String = p.toString().padStart(3, '0')
+    fun fmtSub(s: Int): String = s.toString().padStart(2, '0')
+
+    fun nextPageCyclic(cur: Int): Int = if (cur >= 899) 100 else cur + 1
+    fun prevPageCyclic(cur: Int): Int = if (cur <= 100) 899 else cur - 1
+
+    /**
+     * Max sottopagine: dinamico via cache.
+     * 0 = sconosciuto, 1 = confermato una sola sub, >=2 = confermato
+     */
+    fun maxSubpagesFor(pageInt: Int): Int =
+        (maxSubCache[pageInt] ?: 0).coerceAtLeast(0)
+
+    fun nextSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub >= maxSub) 1 else curSub + 1
+    fun prevSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub <= 1) maxSub else curSub - 1
+
     /**
      * Carica pagina+sub.
      * pushToHistory = true => salva lo stato precedente per UNDO
@@ -128,7 +154,10 @@ fun TelevideoApp() {
         val parsed = parsePageAndSub(input) ?: return
         val (page, sub) = parsed
 
-        // --- NEW: request id + latest-wins ---
+        val pageInt = page.toIntOrNull()
+        val subInt = sub.toIntOrNull()
+
+        // request id + latest-wins
         val reqId = ++requestCounter
         activeRequestId = reqId
 
@@ -140,28 +169,25 @@ fun TelevideoApp() {
             "R#$reqId start reason=$reason input='$input' prev=$prevKey -> target=$newKey (cancelPrev=${loadJob != null})"
         )
 
-        // ✅ cancella eventuale load precedente (swipe rapidi)
+        // cancella eventuale load precedente (swipe rapidi)
         loadJob?.cancel()
 
-        // ✅ push history SOLO se:
+        // push history SOLO se:
         // - non siamo in undo
         // - pushToHistory true
         // - stiamo davvero cambiando pagina/sub
         if (!isUndoing && pushToHistory && newKey != prevKey) {
             history.add(prevKey)
-            if (history.size > 80) history.removeAt(0) // cap per sicurezza
+            if (history.size > 80) history.removeAt(0)
             Log.d("TVDBG", "HISTORY push $prevKey  (size=${history.size})")
         }
 
         loadJob = scope.launch {
-            // Imposta loading SOLO se questa è ancora la request attiva
             if (reqId == activeRequestId) {
                 isLoading = true
                 errorText = null
-                // aggiorna SUBITO lo stato richiesto
                 currentPage = page
                 currentSubpage = sub
-                // reset aree
                 clickAreas = emptyList()
             }
 
@@ -173,14 +199,22 @@ fun TelevideoApp() {
                     val bmpDeferred = async(Dispatchers.IO) { repo.fetchBitmap(newKey) }
                     val bmp = bmpDeferred.await()
 
-                    // 2) clickAreas: usa overload con bitmap (così compila e può fare OCR fallback)
+                    // impara maxSub su success (solo se sub>=2)
+                    if (pageInt != null && subInt != null && subInt >= 2) {
+                        val prevMax = maxSubCache[pageInt] ?: 0
+                        if (subInt > prevMax) {
+                            maxSubCache[pageInt] = subInt
+                            Log.d(TAG_NAV, "MAXSUB learn success page=$pageInt -> $subInt")
+                        }
+                    }
+
+                    // 2) clickAreas
                     val areas = try {
                         repo.fetchClickAreas(page, bmp)
                     } catch (_: Exception) {
                         emptyList()
                     }
 
-                    // --- NEW: applica risultati solo se ancora attiva ---
                     if (reqId == activeRequestId) {
                         bitmap = bmp
                         clickAreas = areas
@@ -190,16 +224,38 @@ fun TelevideoApp() {
                     }
                 }
             } catch (ce: CancellationException) {
-                // cancellata perché è arrivata una richiesta più nuova
                 Log.d(TAG_NAV, "R#$reqId cancelled active=R#$activeRequestId target=$newKey")
                 throw ce
             } catch (e: Exception) {
-                if (reqId == activeRequestId) {
-                    errorText = e.message ?: "Unknown error"
+                // se fallisce una sub>=2, riduci maxSub a sub-1 (min 1)
+                if (pageInt != null && subInt != null && subInt >= 2) {
+                    val prevMax = maxSubCache[pageInt] ?: 0
+                    if (prevMax == 0 || prevMax >= subInt) {
+                        val newMax = (subInt - 1).coerceAtLeast(1)
+                        maxSubCache[pageInt] = newMax
+                        Log.w(TAG_NAV, "MAXSUB learn failure page=$pageInt -> $newMax (failed sub=$subInt)")
+                    }
                 }
-                Log.e(TAG_NAV, "R#$reqId error target=$newKey msg=${e.message}", e)
+
+                // Caso speciale: stavamo provando ad espandere (es. 03) e non esiste.
+                // In quel caso WRAP automatico a sub 01, senza lasciare l'errore a schermo.
+                val isExpandAttempt = reason.startsWith("SWIPE_SUB_EXPAND")
+                if (isExpandAttempt && reqId == activeRequestId && pageInt != null) {
+                    Log.w(TAG_NAV, "R#$reqId expand failed -> WRAP to ${fmtPage(pageInt)} (sub 01)")
+                    errorText = null
+
+                    // schedula il wrap subito dopo (senza push history)
+                    scope.launch {
+                        delay(10)
+                        load(fmtPage(pageInt), pushToHistory = false, reason = "SWIPE_SUB_WRAP_AFTER_FAIL")
+                    }
+                } else {
+                    if (reqId == activeRequestId) {
+                        errorText = e.message ?: "Unknown error"
+                    }
+                    Log.e(TAG_NAV, "R#$reqId error target=$newKey msg=${e.message}", e)
+                }
             } finally {
-                // --- NEW: evita che una vecchia request spenga il loading della nuova ---
                 if (reqId == activeRequestId) {
                     isLoading = false
                     isUndoing = false
@@ -223,36 +279,13 @@ fun TelevideoApp() {
         load(prev, pushToHistory = false, reason = "UNDO")
     }
 
-    // ----------------------------
-    // ✅ Helpers per swipe ciclici
-    // ----------------------------
-    fun fmtPage(p: Int): String = p.toString().padStart(3, '0')
-    fun fmtSub(s: Int): String = s.toString().padStart(2, '0')
-
-    fun nextPageCyclic(cur: Int): Int = if (cur >= 899) 100 else cur + 1
-    fun prevPageCyclic(cur: Int): Int = if (cur <= 100) 899 else cur - 1
-
-    /**
-     * Conoscenza sulle sottopagine.
-     * Per ora: 102 ha 11 sottopagine. Le altre 1.
-     */
-    fun maxSubpagesFor(pageInt: Int): Int = when (pageInt) {
-        102 -> 11
-        else -> 1
-    }
-
-    fun nextSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub >= maxSub) 1 else curSub + 1
-    fun prevSubCyclic(curSub: Int, maxSub: Int): Int = if (curSub <= 1) maxSub else curSub - 1
-
-    // ✅ Primo load: piccola delay per evitare glitch iniziale emulatore (la tua pagina 100 “sparisce”)
+    // Primo load
     LaunchedEffect(Unit) {
         delay(80)
         load("101", pushToHistory = false, reason = "STARTUP")
     }
 
-    // ✅ Box per poter mettere l'overlay sopra la UI
     Box(modifier = Modifier.fillMaxSize()) {
-
         TelevideoScreen(
             currentPage = currentPage,
             bitmap = bitmap,
@@ -266,7 +299,7 @@ fun TelevideoApp() {
             },
             onLoadPage = { load(it, pushToHistory = true, reason = "KEYPAD/TAP") },
 
-            // ✅ SWIPE PAGINA: CICLICO 100..899 (e va in history)
+            // SWIPE PAGINA: CICLICO 100..899
             onSwipePage = { delta ->
                 val gId = ++gestureCounter
 
@@ -285,20 +318,43 @@ fun TelevideoApp() {
                 load(target, pushToHistory = true, reason = "SWIPE_PAGE G#$gId")
             },
 
-            // ✅ SWIPE SUB: CICLICO 01..maxSubpages (e va in history)
+            // SWIPE SUB:
+            // - se sconosciuto: PROBE 02
+            // - se maxSub>=2: se sei su max e vai su, prova ad espandere a max+1 prima di wrappare
             onSwipeSub = { delta ->
                 val gId = ++gestureCounter
 
                 val pageInt = currentPage.toIntOrNull() ?: return@TelevideoScreen
-                val maxSub = maxSubpagesFor(pageInt).coerceAtLeast(1)
+                val maxSub = maxSubpagesFor(pageInt) // 0=sconosciuto
 
+                // Se sconosciuto, prova a caricare la sub 02 per "scoprire" se esiste
+                if (maxSub == 0) {
+                    val targetKey = "${fmtPage(pageInt)}-02"
+                    Log.d(TAG_NAV, "G#$gId swipeSub PROBE delta=$delta page=${fmtPage(pageInt)} -> target=$targetKey")
+                    load(targetKey, pushToHistory = true, reason = "SWIPE_SUB_PROBE G#$gId")
+                    return@TelevideoScreen
+                }
+
+                // Se confermato 1 sola sottopagina, ignora lo swipe sub
                 if (maxSub == 1) {
-                    Log.d(TAG_NAV, "G#$gId swipeSub ignored (maxSub=1) page=${fmtPage(pageInt)}")
+                    Log.d(TAG_NAV, "G#$gId swipeSub ignored (maxSub=1 confirmed) page=${fmtPage(pageInt)}")
                     return@TelevideoScreen
                 }
 
                 val subInt = currentSubpage.toIntOrNull() ?: return@TelevideoScreen
                 val curSub = subInt.coerceIn(1, maxSub)
+
+                // ESPANSIONE: se sei su maxSub e swipe su, prova maxSub+1 prima del wrap
+                if (delta > 0 && curSub == maxSub && maxSub < 99) {
+                    val probeNext = maxSub + 1
+                    val targetKey = "${fmtPage(pageInt)}-${fmtSub(probeNext)}"
+                    Log.d(
+                        TAG_NAV,
+                        "G#$gId swipeSub EXPAND delta=$delta page=${fmtPage(pageInt)} fromSub=${fmtSub(curSub)}/$maxSub -> probe=$targetKey"
+                    )
+                    load(targetKey, pushToHistory = true, reason = "SWIPE_SUB_EXPAND G#$gId")
+                    return@TelevideoScreen
+                }
 
                 val nextSub = when {
                     delta > 0 -> nextSubCyclic(curSub, maxSub)
@@ -329,11 +385,9 @@ fun TelevideoApp() {
                 }
             },
 
-            // ✅ Undo: lo usi per il TAP a 2 dita (NON per bottone)
             onUndo = { undo() }
         )
 
-        // ✅ Splash semitrasparente: ogni avvio, chiusura manuale con OK
         GestureHelpOverlay(
             visible = showHelp,
             onDismiss = { showHelp = false }
